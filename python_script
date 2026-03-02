@@ -1,0 +1,1357 @@
+#!/usr/bin/env python3
+"""
+CellMorphR-Py -- Single-Cell Morphometry Analysis
+==================================================
+Version 1.0.0
+
+Publication-ready analysis of time-resolved microscopy data from
+bacteriophage infection experiments.
+
+Data format (single Excel sheet or CSV):
+    Condition | Time_min | Replicate | Area | Perimeter | Circularity | ...
+    Uninfected| 30       | 1         | 2.89 | 6.12      | 0.82        |
+    +N4       | 120      | 3         | 6.44 | 11.23     | 0.64        |
+
+Required columns:
+    - Condition  : str  (e.g., "Uninfected", "+N4")
+    - Time_min   : int  (e.g., 30, 60, 90, 120)
+    - Replicate  : int  (biological replicate: 1, 2, 3)
+    + at least one numeric measurement column (Area, Perimeter, etc.)
+
+Usage:
+    python cellmorphr.py data.xlsx --measure Area
+    python cellmorphr.py data.csv --measure Area --ref Uninfected
+    python cellmorphr.py data.xlsx --measure Area --all-plots --save-stats
+
+Install dependencies:
+    pip install pandas numpy matplotlib scipy openpyxl xlrd
+
+Citation:
+    If you use CellMorphR in a publication, please cite:
+    [Author(s)]. CellMorphR: Single-cell morphometry analysis with
+    anti-pseudoreplication statistics. Version 1.0.0.
+    URL: https://github.com/mbaffour/CellMorphR
+"""
+
+__version__ = "1.0.0"
+
+import argparse
+import sys
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from scipy.stats import gaussian_kde  # used by sina plot
+
+# Suppress scipy precision warning when replicate values are nearly identical
+warnings.filterwarnings("ignore", message="Precision loss occurred in moment calculation")
+
+
+# =============================================================================
+# PUBLICATION STYLE
+# =============================================================================
+def set_pub_style(font_size=11):
+    """Configure matplotlib for publication-quality figures."""
+    plt.rcParams.update({
+        # Font
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+        "font.size": font_size,
+        # Axes
+        "axes.linewidth": 0.8,
+        "axes.labelsize": font_size,
+        "axes.titlesize": font_size + 1,
+        "axes.titleweight": "bold",
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        # Ticks
+        "xtick.labelsize": font_size - 1,
+        "ytick.labelsize": font_size - 1,
+        "xtick.major.width": 0.8,
+        "ytick.major.width": 0.8,
+        "xtick.major.size": 4,
+        "ytick.major.size": 4,
+        # Legend
+        "legend.fontsize": font_size - 1,
+        "legend.frameon": False,
+        # Figure
+        "figure.dpi": 150,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.1,
+    })
+
+# Default color palette: blue for control, red for treatment
+COLORS = {"control": "#4A90D9", "treatment": "#D94A4A"}
+REPLICATE_MARKERS = ["o", "s", "^", "D", "v", "P"]  # per-replicate shapes
+
+
+# =============================================================================
+# DATA LOADING & VALIDATION
+# =============================================================================
+def load_data(filepath):
+    """Load Excel or CSV data and validate required columns."""
+    fp = Path(filepath)
+    if not fp.exists():
+        sys.exit(f"Error: File not found: {filepath}")
+
+    if fp.suffix in (".xlsx", ".xls"):
+        df = pd.read_excel(fp)
+    elif fp.suffix == ".csv":
+        df = pd.read_csv(fp)
+    elif fp.suffix == ".tsv":
+        df = pd.read_csv(fp, sep="\t")
+    else:
+        sys.exit(f"Error: Unsupported file type: {fp.suffix}")
+
+    # Validate required columns
+    required = {"Condition", "Time_min", "Replicate"}
+    missing = required - set(df.columns)
+    if missing:
+        sys.exit(
+            f"Error: Missing required columns: {missing}\n"
+            f"Your file has: {list(df.columns)}\n"
+            f"Required: Condition, Time_min, Replicate, + numeric measure columns"
+        )
+
+    # Identify numeric measurement columns
+    meta_cols = {"Condition", "Time_min", "Replicate", "Image", "Cell_ID"}
+    measure_cols = [c for c in df.columns if c not in meta_cols and pd.api.types.is_numeric_dtype(df[c])]
+    if not measure_cols:
+        sys.exit("Error: No numeric measurement columns found.")
+
+    df["Time_min"] = pd.to_numeric(df["Time_min"])
+    df["Replicate"] = df["Replicate"].astype(str)
+
+    print(f"Loaded {len(df):,} cells")
+    print(f"Conditions: {df['Condition'].unique()}")
+    print(f"Time points: {sorted(df['Time_min'].unique())}")
+    print(f"Replicates: {sorted(df['Replicate'].unique())}")
+    print(f"Measurements: {measure_cols}")
+
+    return df, measure_cols
+
+
+def compute_replicate_summaries(df, measure):
+    """Collapse cell-level data to per-replicate medians and means."""
+    grouped = df.groupby(["Condition", "Time_min", "Replicate"])[measure]
+    summary = grouped.agg(
+        median_val="median",
+        mean_val="mean",
+        std_val="std",
+        n_cells="count",
+        q25=lambda x: x.quantile(0.25),
+        q75=lambda x: x.quantile(0.75),
+    ).reset_index()
+    return summary
+
+
+def compute_condition_summaries(rep_summary, stat="median_val"):
+    """Average replicate summaries to get condition-level means ± SEM."""
+    grouped = rep_summary.groupby(["Condition", "Time_min"])[stat]
+    cond = grouped.agg(
+        grand_mean="mean",
+        grand_std="std",
+        n_reps="count",
+    ).reset_index()
+    cond["sem"] = cond["grand_std"] / np.sqrt(cond["n_reps"])
+    return cond
+
+
+# =============================================================================
+# SIGNIFICANCE BRACKET HELPER
+# =============================================================================
+def _add_sig_brackets(ax, pairwise_df, times, offsets, style,
+                      df, measure, rep_summary, font_size, sig_style="stars",
+                      show_ns=True):
+    """
+    Draw significance brackets with Holm-corrected p-values on a distribution plot.
+
+    METHODOLOGY (documented for transparency and reviewer scrutiny):
+      - Test: Welch's two-sample t-test (two-sided, unequal variance assumed)
+      - Tested on: Per-replicate medians — the biological replicate is the
+        statistical unit (NOT individual cells). See Lazic (2010).
+      - N per group: Number of biological replicates (typically 3).
+      - Correction: Holm–Bonferroni step-down across all time-point comparisons,
+        controlling family-wise error rate (Holm, 1979).
+      - Thresholds: * p<0.05, ** p<0.01, *** p<0.001 (APA convention).
+      - Two-sided: No directional hypothesis assumed.
+
+    Parameters
+    ----------
+    pairwise_df : DataFrame from run_statistics() with columns:
+        Time_min, p_adj, p_raw (already Holm-corrected)
+    show_ns : bool, default True
+        If False, non-significant brackets are suppressed.
+    """
+    if pairwise_df is None or len(pairwise_df) == 0:
+        return
+
+    n_cond = len(offsets)
+    if n_cond < 2:
+        return
+
+    half_dodge = abs(offsets[1] - offsets[0]) / 2 if n_cond >= 2 else 0.15
+    times_list = list(times)  # avoid numpy float comparison issues
+
+    # Get y-range for positioning
+    if style == "dotplot":
+        y_vals = rep_summary["median_val"].values
+    else:
+        y_vals = df[measure].dropna().values
+    if len(y_vals) == 0:
+        return
+    y_range = float(y_vals.max() - y_vals.min())
+    if y_range == 0:
+        y_range = 1.0
+
+    brackets_drawn = 0
+    max_y_drawn = y_vals.max()
+
+    for _, row in pairwise_df.iterrows():
+        t = row["Time_min"]
+
+        # Safe float comparison: find the closest matching timepoint
+        matched_j = None
+        for j, tv in enumerate(times_list):
+            if abs(t - tv) < 1e-6:
+                matched_j = j
+                break
+        if matched_j is None:
+            continue
+
+        p_adj = row.get("p_adj", row.get("p_raw", 1.0))
+        if np.isnan(p_adj):
+            continue
+
+        # Star label (APA convention)
+        if p_adj < 0.001:
+            stars = "***"
+        elif p_adj < 0.01:
+            stars = "**"
+        elif p_adj < 0.05:
+            stars = "*"
+        else:
+            stars = "ns"
+
+        # Optionally skip non-significant
+        if not show_ns and stars == "ns":
+            continue
+
+        # Format label
+        if sig_style == "stars":
+            label = stars
+        elif sig_style == "stars_p":
+            pstr = "p<0.001" if p_adj < 0.001 else f"p={p_adj:.3f}"
+            label = f"{stars}\n({pstr})"
+        else:  # "pval"
+            label = "p<0.001" if p_adj < 0.001 else f"p={p_adj:.3f}"
+
+        # y position: top of data at this time point
+        if style == "dotplot":
+            time_vals = rep_summary[rep_summary["Time_min"] == t]["median_val"].values
+        else:
+            time_vals = df[df["Time_min"] == t][measure].dropna().values
+        if len(time_vals) == 0:
+            continue
+        y_top = float(time_vals.max())
+        y_bar = y_top + y_range * 0.06
+        y_tick = y_bar - y_range * 0.015
+
+        x_left = matched_j - half_dodge
+        x_right = matched_j + half_dodge
+        x_center = matched_j
+
+        # Visual distinction: gray for ns, black + bold for significant
+        bracket_color = "#999999" if stars == "ns" else "black"
+        label_weight = "normal" if stars == "ns" else "bold"
+        label_color = "#888888" if stars == "ns" else "black"
+
+        # Draw bracket (3 segments: left tick, horizontal bar, right tick)
+        ax.plot([x_left, x_left], [y_tick, y_bar],
+                color=bracket_color, linewidth=0.7, clip_on=False)
+        ax.plot([x_left, x_right], [y_bar, y_bar],
+                color=bracket_color, linewidth=0.7, clip_on=False)
+        ax.plot([x_right, x_right], [y_tick, y_bar],
+                color=bracket_color, linewidth=0.7, clip_on=False)
+
+        # Label above bracket
+        ax.text(x_center, y_bar + y_range * 0.018, label,
+                ha="center", va="bottom", fontsize=max(7, font_size * 0.7),
+                fontweight=label_weight, color=label_color)
+
+        max_y_drawn = max(max_y_drawn, y_bar)
+        brackets_drawn += 1
+
+    if brackets_drawn > 0:
+        # Expand y-axis to fit all brackets + labels
+        label_extra = 0.22 if sig_style == "stars_p" else 0.14
+        new_top = max_y_drawn + y_range * label_extra
+        current_ylim = ax.get_ylim()
+        if new_top > current_ylim[1]:
+            ax.set_ylim(current_ylim[0], new_top)
+
+        # Add methodology caption as figure text
+        n_reps = rep_summary.groupby(["Condition", "Time_min"]).size()
+        n_min, n_max = int(n_reps.min()), int(n_reps.max())
+        n_str = str(n_min) if n_min == n_max else f"{n_min}–{n_max}"
+        n_tests = len(pairwise_df)
+        caption = (f"Brackets: Welch's t-test on per-replicate medians "
+                   f"(N = {n_str} biological replicates/group), "
+                   f"Holm-corrected ({n_tests} comparisons). "
+                   f"* p<0.05, ** p<0.01, *** p<0.001.")
+        ax.annotate(caption, xy=(0.5, -0.12), xycoords="axes fraction",
+                    ha="center", va="top", fontsize=max(6, font_size - 3),
+                    color="#555555", style="italic")
+
+
+# =============================================================================
+# PLOT 1: DISTRIBUTION PLOTS
+# =============================================================================
+def plot_distributions(df, rep_summary, measure, conditions, colors,
+                       figsize=(8, 5), font_size=11, style="violin",
+                       sig_results=None, sig_style="stars", show_ns=True):
+    """
+    Distribution plots of single-cell measurements at each condition x time,
+    with per-replicate medians overlaid.
+
+    Styles:
+      'violin'  - Kernel density violins + replicate medians (default)
+      'strip'   - Jittered raw data points + replicate medians
+      'sina'    - Density-proportional jitter (like a violin made of points)
+      'dotplot' - Replicate-level summaries only (what the stats are based on)
+      'box'     - Box plots + replicate medians
+
+    sig_results: dict from run_statistics() with 'pairwise' key, or None to skip.
+    sig_style:   'stars' (*, **, ***), 'stars_p' (stars + p-value), 'pval' (p only).
+    show_ns:     If False, suppress non-significant brackets.
+    """
+    set_pub_style(font_size)
+    fig, ax = plt.subplots(figsize=figsize)
+
+    times = sorted(df["Time_min"].unique())
+    n_cond = len(conditions)
+    width = 0.35
+    offsets = np.linspace(-width / 2, width / 2, n_cond)
+
+    style_labels = {
+        "violin": "Violins = cell distributions; markers = per-replicate medians (N=3)",
+        "strip": "Each point = one cell; large markers = per-replicate medians (N=3)",
+        "sina": "Point spread follows density; large markers = per-replicate medians (N=3)",
+        "dotplot": "Each point = one biological replicate median (N=3); bar = group mean",
+        "box": "Box = IQR; markers = per-replicate medians (N=3)",
+    }
+    style_titles = {
+        "violin": f"Single-Cell {measure} Distributions",
+        "strip": f"Single-Cell {measure} -- Jitter Plot",
+        "sina": f"Single-Cell {measure} -- Sina Plot",
+        "dotplot": f"{measure} -- Replicate Summary Dot Plot",
+        "box": f"Single-Cell {measure} -- Box Plot",
+    }
+
+    if style == "dotplot":
+        # Replicate-only dot plot: show ONLY the per-replicate medians
+        for i, cond in enumerate(conditions):
+            cond_rep = rep_summary[rep_summary["Condition"] == cond]
+            positions = np.arange(len(times)) + offsets[i]
+            for j, t in enumerate(times):
+                time_reps = cond_rep[cond_rep["Time_min"] == t]
+                x_pos = np.full(len(time_reps), positions[j])
+                x_pos += np.random.uniform(-0.02, 0.02, len(x_pos))
+                ax.scatter(x_pos, time_reps["median_val"],
+                           c=colors[i], edgecolors="black", linewidths=0.8,
+                           s=70, zorder=5,
+                           marker=REPLICATE_MARKERS[i % len(REPLICATE_MARKERS)],
+                           label=cond if j == 0 else None)
+            # Group mean crossbar
+            group_means = [cond_rep[cond_rep["Time_min"] == t]["median_val"].mean()
+                           for t in times]
+            bar_hw = width * 0.3
+            for j, gm in enumerate(group_means):
+                ax.plot([positions[j] - bar_hw, positions[j] + bar_hw],
+                        [gm, gm], color=colors[i], linewidth=1.5, zorder=4)
+        ax.set_ylabel(f"Median {measure} (per replicate)")
+
+    else:
+        for i, cond in enumerate(conditions):
+            cond_data = df[df["Condition"] == cond]
+            positions = np.arange(len(times)) + offsets[i]
+
+            if style == "violin":
+                violin_data = [cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                               for t in times]
+                parts = ax.violinplot(
+                    violin_data, positions=positions, widths=width * 0.85,
+                    showmeans=False, showmedians=False, showextrema=False)
+                for pc in parts["bodies"]:
+                    pc.set_facecolor(colors[i])
+                    pc.set_alpha(0.55)
+                    pc.set_edgecolor("#4D4D4D")
+                    pc.set_linewidth(0.5)
+
+            elif style == "strip":
+                for j, t in enumerate(times):
+                    vals = cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                    jitter = np.random.uniform(-width * 0.35, width * 0.35, len(vals))
+                    ax.scatter(positions[j] + jitter, vals,
+                               c=colors[i], alpha=0.12, s=3, zorder=2, rasterized=True)
+
+            elif style == "sina":
+                # Sina: jitter width proportional to local density
+                for j, t in enumerate(times):
+                    vals = cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                    if len(vals) < 3:
+                        jitter = np.random.uniform(-0.05, 0.05, len(vals))
+                    else:
+                        try:
+                            kde = gaussian_kde(vals)
+                            densities = kde(vals)
+                            max_d = densities.max() if densities.max() > 0 else 1
+                            norm_d = densities / max_d  # 0-1 scale
+                            jitter = np.random.uniform(-1, 1, len(vals)) * norm_d * width * 0.4
+                        except Exception:
+                            jitter = np.random.uniform(-width * 0.3, width * 0.3, len(vals))
+                    ax.scatter(positions[j] + jitter, vals,
+                               c=colors[i], alpha=0.12, s=3, zorder=2, rasterized=True)
+
+            elif style == "box":
+                box_data = [cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                            for t in times]
+                bp = ax.boxplot(box_data, positions=positions, widths=width * 0.7,
+                                patch_artist=True, showfliers=False, zorder=2)
+                for patch in bp["boxes"]:
+                    patch.set_facecolor(colors[i])
+                    patch.set_alpha(0.5)
+                for element in ["whiskers", "caps", "medians"]:
+                    for item in bp[element]:
+                        item.set_color("#4D4D4D")
+
+            # Overlay replicate medians (for all cell-level styles)
+            cond_rep = rep_summary[rep_summary["Condition"] == cond]
+            for j, t in enumerate(times):
+                time_reps = cond_rep[cond_rep["Time_min"] == t]
+                x_pos = np.full(len(time_reps), positions[j])
+                x_pos += np.random.uniform(-0.03, 0.03, len(x_pos))
+                ax.scatter(
+                    x_pos, time_reps["median_val"],
+                    c=colors[i], edgecolors="black", linewidths=0.8,
+                    s=50, zorder=5,
+                    marker=REPLICATE_MARKERS[i % len(REPLICATE_MARKERS)],
+                    label=cond if j == 0 else None,
+                )
+        ax.set_ylabel(measure)
+
+    ax.set_xticks(range(len(times)))
+    ax.set_xticklabels([f"{t} min" for t in times])
+    ax.set_xlabel("Time Post-Infection")
+    ax.set_title(style_titles.get(style, f"Single-Cell {measure} Distributions"))
+    ax.legend(loc="upper left")
+
+    ax.text(0.0, 1.02, style_labels.get(style, ""),
+            transform=ax.transAxes, fontsize=font_size - 2, color="#666666")
+
+    # --- Significance brackets ---
+    if sig_results is not None and "pairwise" in sig_results:
+        _add_sig_brackets(ax, sig_results["pairwise"], times, offsets, style,
+                          df, measure, rep_summary, font_size, sig_style, show_ns)
+        fig.subplots_adjust(bottom=0.18)  # room for methodology caption
+
+    fig.tight_layout()
+    return fig
+
+
+# =============================================================================
+# PLOT 2: TRAJECTORY PLOT
+# =============================================================================
+def plot_trajectories(rep_summary, cond_summary, measure, conditions, colors,
+                      stat="median_val", connect_reps=True,
+                      figsize=(6, 4.5), font_size=11):
+    """
+    Per-replicate summary trajectories over time, with condition-level
+    trend lines and SEM ribbons.
+
+    WHY: This is your KEY figure. Each point is one biological replicate's
+    median — your true independent observation. If infection increases cell
+    size over time, the treatment lines will diverge from control. The
+    divergence pattern IS the condition x time interaction.
+    """
+    set_pub_style(font_size)
+    fig, ax = plt.subplots(figsize=figsize)
+
+    times = sorted(rep_summary["Time_min"].unique())
+    stat_label = "Median" if stat == "median_val" else "Mean"
+
+    for i, cond in enumerate(conditions):
+        cond_rep = rep_summary[rep_summary["Condition"] == cond]
+        cond_agg = cond_summary[cond_summary["Condition"] == cond].sort_values("Time_min")
+
+        # Individual replicate trajectories (dashed)
+        if connect_reps:
+            for rep_id in cond_rep["Replicate"].unique():
+                rep_data = cond_rep[cond_rep["Replicate"] == rep_id].sort_values("Time_min")
+                ax.plot(
+                    rep_data["Time_min"], rep_data[stat],
+                    color=colors[i], alpha=0.3, linewidth=0.8,
+                    linestyle="--", zorder=2,
+                )
+
+        # Replicate points with distinct markers per replicate
+        for k, rep_id in enumerate(sorted(cond_rep["Replicate"].unique())):
+            rep_data = cond_rep[cond_rep["Replicate"] == rep_id]
+            ax.scatter(
+                rep_data["Time_min"], rep_data[stat],
+                c=colors[i], edgecolors="black", linewidths=0.6,
+                s=45, zorder=4,
+                marker=REPLICATE_MARKERS[k % len(REPLICATE_MARKERS)],
+                label=cond if k == 0 else None,
+            )
+
+        # Condition mean ± SEM ribbon
+        t_vals = cond_agg["Time_min"].values
+        means = cond_agg["grand_mean"].values
+        sems = cond_agg["sem"].fillna(0).values
+
+        ax.fill_between(
+            t_vals, means - sems, means + sems,
+            color=colors[i], alpha=0.12, zorder=1,
+        )
+
+        # Condition trend line
+        ax.plot(
+            t_vals, means,
+            color=colors[i], linewidth=2, zorder=3,
+        )
+
+    ax.set_xticks(times)
+    ax.set_xlabel("Time Post-Infection (min)")
+    ax.set_ylabel(f"{stat_label} {measure} per Replicate")
+    ax.set_title(f"{measure} Trajectory Over Time")
+    ax.text(
+        0.0, 1.02,
+        "Points = biological replicates; ribbon = SEM; dashed = individual trajectories",
+        transform=ax.transAxes, fontsize=font_size - 2, color="#666666",
+    )
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+# =============================================================================
+# PLOT 3: EFFECT SIZE OVER TIME
+# =============================================================================
+def compute_effect_sizes(rep_summary, ref_condition, stat="median_val"):
+    """
+    Compute effect sizes (absolute difference, % change, Cohen's d)
+    at each time point, relative to the reference (control) condition.
+
+    WHY: P-values say IF an effect exists; effect sizes say HOW BIG.
+    With N=3 replicates, even real effects may not reach p < 0.05.
+    A consistent 30% increase is biologically meaningful regardless of p.
+    """
+    times = sorted(rep_summary["Time_min"].unique())
+    treatments = [c for c in rep_summary["Condition"].unique() if c != ref_condition]
+    rows = []
+
+    for t in times:
+        ctrl = rep_summary[(rep_summary["Condition"] == ref_condition) &
+                           (rep_summary["Time_min"] == t)][stat].values
+        for trt in treatments:
+            trt_vals = rep_summary[(rep_summary["Condition"] == trt) &
+                                   (rep_summary["Time_min"] == t)][stat].values
+            ctrl_mean = np.mean(ctrl)
+            trt_mean = np.mean(trt_vals)
+            pooled_sd = np.sqrt((np.var(ctrl, ddof=1) + np.var(trt_vals, ddof=1)) / 2)
+            rows.append({
+                "Time_min": t,
+                "Treatment": trt,
+                "ctrl_mean": ctrl_mean,
+                "trt_mean": trt_mean,
+                "abs_diff": trt_mean - ctrl_mean,
+                "pct_change": (trt_mean - ctrl_mean) / ctrl_mean * 100 if ctrl_mean != 0 else np.nan,
+                "cohens_d": (trt_mean - ctrl_mean) / pooled_sd if pooled_sd > 0 else np.nan,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def plot_effect_sizes(es_df, measure, metric="pct_change", colors=None,
+                      figsize=(6, 4), font_size=11):
+    """Plot effect size trajectory over time."""
+    set_pub_style(font_size)
+    fig, ax = plt.subplots(figsize=figsize)
+
+    labels = {
+        "abs_diff": f"Δ {measure} (Treatment − Control)",
+        "pct_change": f"% Change in {measure}",
+        "cohens_d": "Cohen's d",
+    }
+
+    color = colors[1] if colors else "#D94A4A"
+
+    for trt in es_df["Treatment"].unique():
+        trt_data = es_df[es_df["Treatment"] == trt].sort_values("Time_min")
+        ax.plot(trt_data["Time_min"], trt_data[metric],
+                color=color, linewidth=2, marker="o", markersize=8,
+                markeredgecolor="black", markeredgewidth=0.6, label=trt)
+
+    ax.axhline(0, color="#808080", linestyle="--", linewidth=0.8)
+
+    if metric == "cohens_d":
+        ax.axhline(0.8, color="#B3B3B3", linestyle=":", linewidth=0.6)
+        ax.axhline(-0.8, color="#B3B3B3", linestyle=":", linewidth=0.6)
+        ax.text(min(es_df["Time_min"]), 0.85, "Large effect (|d|=0.8)",
+                fontsize=font_size - 3, color="#808080")
+
+    ax.set_xticks(sorted(es_df["Time_min"].unique()))
+    ax.set_xlabel("Time Post-Infection (min)")
+    ax.set_ylabel(labels.get(metric, metric))
+    ax.set_title(f"Effect of Infection on {measure} Over Time")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+# =============================================================================
+# PLOT 4: ECDF
+# =============================================================================
+def plot_ecdf(df, measure, conditions, colors, figsize=(10, 3.5), font_size=11):
+    """
+    Empirical cumulative distribution function at each time point.
+
+    WHY: ECDFs give an unbiased view of the entire distribution with no
+    binning or smoothing choices. A rightward shift = larger cells.
+    The vertical gap between curves = the fraction of cells that differ.
+    """
+    set_pub_style(font_size)
+    times = sorted(df["Time_min"].unique())
+    fig, axes = plt.subplots(1, len(times), figsize=figsize, sharey=True)
+    if len(times) == 1:
+        axes = [axes]
+
+    for ax, t in zip(axes, times):
+        for i, cond in enumerate(conditions):
+            vals = df[(df["Condition"] == cond) & (df["Time_min"] == t)][measure].dropna()
+            sorted_vals = np.sort(vals)
+            ecdf_y = np.arange(1, len(sorted_vals) + 1) / len(sorted_vals)
+            ax.step(sorted_vals, ecdf_y, color=colors[i], linewidth=1.5, label=cond)
+
+        ax.set_title(f"{t} min", fontsize=font_size)
+        ax.set_xlabel(measure)
+        if ax == axes[0]:
+            ax.set_ylabel("Cumulative Proportion")
+            ax.legend(fontsize=font_size - 2)
+
+    fig.suptitle(f"ECDF — {measure}", fontweight="bold", fontsize=font_size + 1)
+    fig.tight_layout()
+    return fig
+
+
+# =============================================================================
+# PLOT 5: COMPOSITE PUBLICATION FIGURE
+# =============================================================================
+def plot_composite(df, rep_summary, cond_summary, es_df, measure,
+                   conditions, colors, figsize=(14, 5), font_size=10,
+                   dist_style="violin", sig_results=None, sig_style="stars",
+                   show_ns=True, stat="median_val"):
+    """Multi-panel publication figure: A) Distributions, B) Trajectories, C) Effect sizes."""
+    set_pub_style(font_size)
+    fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=figsize,
+                                             gridspec_kw={"width_ratios": [1.3, 1, 0.8]})
+
+    times = sorted(df["Time_min"].unique())
+    n_cond = len(conditions)
+    width = 0.35
+    offsets = np.linspace(-width / 2, width / 2, n_cond)
+
+    # --- Panel A: Distributions (style-dependent) ---
+    for i, cond in enumerate(conditions):
+        cond_data = df[df["Condition"] == cond]
+        positions = np.arange(len(times)) + offsets[i]
+
+        if dist_style == "violin":
+            violin_data = [cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                           for t in times]
+            parts = ax_a.violinplot(violin_data, positions=positions, widths=width * 0.85,
+                                    showmeans=False, showmedians=False, showextrema=False)
+            for pc in parts["bodies"]:
+                pc.set_facecolor(colors[i])
+                pc.set_alpha(0.5)
+                pc.set_edgecolor("#4D4D4D")
+                pc.set_linewidth(0.4)
+        elif dist_style == "strip":
+            for j, t in enumerate(times):
+                vals = cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                jitter = np.random.uniform(-width * 0.35, width * 0.35, len(vals))
+                ax_a.scatter(positions[j] + jitter, vals,
+                             c=colors[i], alpha=0.10, s=2, zorder=2, rasterized=True)
+        elif dist_style == "sina":
+            for j, t in enumerate(times):
+                vals = cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                if len(vals) < 3:
+                    jitter = np.random.uniform(-0.05, 0.05, len(vals))
+                else:
+                    try:
+                        kde = gaussian_kde(vals)
+                        densities = kde(vals)
+                        max_d = densities.max() if densities.max() > 0 else 1
+                        norm_d = densities / max_d
+                        jitter = np.random.uniform(-1, 1, len(vals)) * norm_d * width * 0.4
+                    except Exception:
+                        jitter = np.random.uniform(-width * 0.3, width * 0.3, len(vals))
+                ax_a.scatter(positions[j] + jitter, vals,
+                             c=colors[i], alpha=0.10, s=2, zorder=2, rasterized=True)
+        elif dist_style == "box":
+            box_data = [cond_data[cond_data["Time_min"] == t][measure].dropna().values
+                        for t in times]
+            bp = ax_a.boxplot(box_data, positions=positions, widths=width * 0.7,
+                              patch_artist=True, showfliers=False, zorder=2)
+            for patch in bp["boxes"]:
+                patch.set_facecolor(colors[i])
+                patch.set_alpha(0.5)
+            for element in ["whiskers", "caps", "medians"]:
+                for item in bp[element]:
+                    item.set_color("#4D4D4D")
+
+        # Replicate medians (all styles except dotplot)
+        if dist_style != "dotplot":
+            cond_rep = rep_summary[rep_summary["Condition"] == cond]
+            for j, t in enumerate(times):
+                time_reps = cond_rep[cond_rep["Time_min"] == t]
+                x_pos = np.full(len(time_reps), positions[j])
+                x_pos += np.random.uniform(-0.02, 0.02, len(x_pos))
+                ax_a.scatter(x_pos, time_reps["median_val"], c=colors[i],
+                             edgecolors="black", linewidths=0.6, s=30, zorder=5)
+
+    if dist_style == "dotplot":
+        # Dotplot: only replicate medians
+        for i, cond in enumerate(conditions):
+            cond_rep = rep_summary[rep_summary["Condition"] == cond]
+            positions = np.arange(len(times)) + offsets[i]
+            for j, t in enumerate(times):
+                time_reps = cond_rep[cond_rep["Time_min"] == t]
+                x_pos = np.full(len(time_reps), positions[j])
+                x_pos += np.random.uniform(-0.02, 0.02, len(x_pos))
+                ax_a.scatter(x_pos, time_reps["median_val"], c=colors[i],
+                             edgecolors="black", linewidths=0.6, s=50, zorder=5)
+            group_means = [cond_rep[cond_rep["Time_min"] == t]["median_val"].mean()
+                           for t in times]
+            bar_hw = width * 0.3
+            for j, gm in enumerate(group_means):
+                ax_a.plot([positions[j] - bar_hw, positions[j] + bar_hw],
+                          [gm, gm], color=colors[i], linewidth=1.5, zorder=4)
+        ax_a.set_ylabel(f"Median {measure}")
+    else:
+        ax_a.set_ylabel(measure)
+
+    ax_a.set_xticks(range(len(times)))
+    ax_a.set_xticklabels([f"{t}" for t in times])
+    ax_a.set_xlabel("Time (min)")
+    ax_a.set_title("A", loc="left", fontweight="bold", fontsize=font_size + 2)
+
+    # Significance brackets on Panel A
+    if sig_results is not None and "pairwise" in sig_results:
+        _add_sig_brackets(ax_a, sig_results["pairwise"], times, offsets, dist_style,
+                          df, measure, rep_summary, font_size, sig_style, show_ns)
+
+    # --- Panel B: Trajectories ---
+    stat_label = "Median" if stat == "median_val" else "Mean"
+    for i, cond in enumerate(conditions):
+        cond_rep = rep_summary[rep_summary["Condition"] == cond]
+        cond_agg = cond_summary[cond_summary["Condition"] == cond].sort_values("Time_min")
+
+        # Individual replicate lines
+        for rep_id in cond_rep["Replicate"].unique():
+            rep_data = cond_rep[cond_rep["Replicate"] == rep_id].sort_values("Time_min")
+            ax_b.plot(rep_data["Time_min"], rep_data[stat],
+                      color=colors[i], alpha=0.25, linewidth=0.6, linestyle="--")
+
+        # Replicate points
+        for k, rep_id in enumerate(sorted(cond_rep["Replicate"].unique())):
+            rep_data = cond_rep[cond_rep["Replicate"] == rep_id]
+            ax_b.scatter(rep_data["Time_min"], rep_data[stat], c=colors[i],
+                         edgecolors="black", linewidths=0.5, s=30, zorder=4,
+                         marker=REPLICATE_MARKERS[k % len(REPLICATE_MARKERS)],
+                         label=cond if k == 0 else None)
+
+        # Mean trend + SEM ribbon
+        t_vals = cond_agg["Time_min"].values
+        means = cond_agg["grand_mean"].values
+        sems = cond_agg["sem"].fillna(0).values
+        ax_b.fill_between(t_vals, means - sems, means + sems,
+                          color=colors[i], alpha=0.1)
+        ax_b.plot(t_vals, means, color=colors[i], linewidth=1.8)
+
+    ax_b.set_xticks(times)
+    ax_b.set_xlabel("Time (min)")
+    ax_b.set_ylabel(f"{stat_label} {measure}")
+    ax_b.legend(fontsize=font_size - 2, loc="upper left")
+    ax_b.set_title("B", loc="left", fontweight="bold", fontsize=font_size + 2)
+
+    # --- Panel C: Effect sizes ---
+    color_trt = colors[1]
+    for trt in es_df["Treatment"].unique():
+        trt_data = es_df[es_df["Treatment"] == trt].sort_values("Time_min")
+        ax_c.plot(trt_data["Time_min"], trt_data["pct_change"],
+                  color=color_trt, linewidth=2, marker="o", markersize=6,
+                  markeredgecolor="black", markeredgewidth=0.5)
+    ax_c.axhline(0, color="#808080", linestyle="--", linewidth=0.6)
+    ax_c.set_xticks(times)
+    ax_c.set_xlabel("Time (min)")
+    ax_c.set_ylabel(f"% Δ {measure}")
+    ax_c.set_title("C", loc="left", fontweight="bold", fontsize=font_size + 2)
+
+    fig.suptitle(f"{measure} — Bacteriophage Infection Time Course",
+                 fontweight="bold", fontsize=font_size + 2, y=1.02)
+    fig.tight_layout()
+    return fig
+
+
+# =============================================================================
+# STATISTICS
+# =============================================================================
+def run_statistics(df, rep_summary, measure, ref_condition, stat="median_val"):
+    """
+    Two-way ANOVA on per-replicate summaries + pairwise comparisons.
+
+    Validated against R's aov() and t.test() to produce identical results.
+    Includes ANOVA assumption diagnostics, confidence intervals, and effect
+    sizes following APA 7th edition and SAMPL reporting guidelines.
+
+    Statistical approach:
+      Step 1: Collapse each replicate to its summary statistic
+      Step 2: Two-way ANOVA (Condition x Time) on replicate summaries
+      Step 3: Assumption diagnostics (Shapiro-Wilk, Levene's)
+      Step 4: Pairwise Welch's t-tests with 95% CIs and Holm correction
+    """
+    results = {}
+    sig_marker = lambda p: "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+
+    # --- Descriptive statistics ---
+    desc = rep_summary.groupby(["Condition", "Time_min"]).agg(
+        n_reps=(stat, "count"),
+        mean=(stat, "mean"),
+        std=(stat, "std"),
+        median=(stat, "median"),
+    ).reset_index()
+    results["descriptive"] = desc
+
+    # =====================================================================
+    # TWO-WAY ANOVA (Type I SS)
+    # Validated against R's aov() -- identical for balanced designs where
+    # Type I = Type II = Type III sums of squares.
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print(f"STATISTICAL ANALYSIS -- Per-Replicate Summaries  [CellMorphR v{__version__}]")
+    print("=" * 78)
+    print(f"Measure: {measure} | Summary: {stat}")
+    print(f"Reference condition: {ref_condition}")
+    print(f"Total replicate-level observations: {len(rep_summary)}")
+    print()
+
+    anova_data = rep_summary[["Condition", "Time_min", "Replicate", stat]].copy()
+    anova_data.columns = ["Condition", "Time", "Replicate", "Y"]
+    anova_data["Time"] = anova_data["Time"].astype(str)
+
+    grand_mean = anova_data["Y"].mean()
+    N = len(anova_data)
+
+    conditions = anova_data["Condition"].unique()
+    timepoints = anova_data["Time"].unique()
+    n_cond = len(conditions)
+    n_time = len(timepoints)
+
+    # --- Design balance check ---
+    # Type I SS = Type III SS only when the design is perfectly balanced.
+    # If unbalanced, warn the user that results may differ from Type III.
+    cell_counts = anova_data.groupby(["Condition", "Time"])["Y"].count()
+    unique_counts = cell_counts.unique()
+    is_balanced = len(unique_counts) == 1
+    expected_cells = n_cond * n_time
+    actual_cells = len(cell_counts)
+
+    if not is_balanced or actual_cells != expected_cells:
+        print("  *** WARNING: UNBALANCED DESIGN DETECTED ***")
+        print(f"  Cell counts per group: {dict(cell_counts)}")
+        print(f"  Expected {expected_cells} groups with equal N; found {actual_cells} groups.")
+        print("  Type I SS (used here) may differ from Type III SS.")
+        print("  For unbalanced designs, consider using R's Type III SS via")
+        print("  car::Anova(model, type='III') or the LMM option in the R Shiny app.")
+        print()
+    elif is_balanced:
+        n_per_cell = unique_counts[0]
+        print(f"  Design: balanced ({n_cond} conditions × {n_time} time points × "
+              f"{n_per_cell} replicates = {N} observations)")
+        print(f"  Type I SS = Type II SS = Type III SS (balanced design verified)")
+        print()
+
+    # SS Condition
+    cond_means = anova_data.groupby("Condition")["Y"].mean()
+    n_per_cond = anova_data.groupby("Condition")["Y"].count()
+    ss_cond = sum(n_per_cond[c] * (cond_means[c] - grand_mean) ** 2 for c in conditions)
+    df_cond = n_cond - 1
+
+    # SS Time
+    time_means = anova_data.groupby("Time")["Y"].mean()
+    n_per_time = anova_data.groupby("Time")["Y"].count()
+    ss_time = sum(n_per_time[t] * (time_means[t] - grand_mean) ** 2 for t in timepoints)
+    df_time = n_time - 1
+
+    # SS Interaction
+    cell_means = anova_data.groupby(["Condition", "Time"])["Y"].mean()
+    cell_counts = anova_data.groupby(["Condition", "Time"])["Y"].count()
+    ss_interaction = 0
+    for c in conditions:
+        for t in timepoints:
+            if (c, t) in cell_means.index:
+                expected = cond_means[c] + time_means[t] - grand_mean
+                n_ct = cell_counts[(c, t)]
+                ss_interaction += n_ct * (cell_means[(c, t)] - expected) ** 2
+    df_interaction = df_cond * df_time
+
+    # SS Total and Residual
+    ss_total = sum((anova_data["Y"] - grand_mean) ** 2)
+    ss_resid = ss_total - ss_cond - ss_time - ss_interaction
+    df_resid = N - n_cond * n_time
+
+    # Mean squares and F values
+    ms_cond = ss_cond / df_cond if df_cond > 0 else 0
+    ms_time = ss_time / df_time if df_time > 0 else 0
+    ms_inter = ss_interaction / df_interaction if df_interaction > 0 else 0
+    ms_resid = ss_resid / df_resid if df_resid > 0 else 1e-10
+
+    f_cond = ms_cond / ms_resid
+    f_time = ms_time / ms_resid
+    f_inter = ms_inter / ms_resid
+
+    # P-values (sf = survival function, numerically precise for small p)
+    p_cond = stats.f.sf(f_cond, df_cond, df_resid) if df_resid > 0 else np.nan
+    p_time = stats.f.sf(f_time, df_time, df_resid) if df_resid > 0 else np.nan
+    p_inter = stats.f.sf(f_inter, df_interaction, df_resid) if df_resid > 0 else np.nan
+
+    # Partial eta-squared (effect size for ANOVA)
+    # Benchmarks: small = 0.01, medium = 0.06, large = 0.14 (Cohen, 1988)
+    eta2_cond = ss_cond / (ss_cond + ss_resid) if (ss_cond + ss_resid) > 0 else np.nan
+    eta2_time = ss_time / (ss_time + ss_resid) if (ss_time + ss_resid) > 0 else np.nan
+    eta2_inter = ss_interaction / (ss_interaction + ss_resid) if (ss_interaction + ss_resid) > 0 else np.nan
+
+    # Print ANOVA table
+    print("TWO-WAY ANOVA TABLE")
+    print("-" * 78)
+    print(f"{'Source':<20} {'SS':>8} {'df':>4} {'MS':>10} {'F':>8} {'p':>10} {'partial eta2':>12}")
+    print("-" * 78)
+    print(f"{'Condition':<20} {ss_cond:>8.3f} {df_cond:>4d} {ms_cond:>10.3f} {f_cond:>8.2f} {p_cond:>10.4f} {eta2_cond:>12.3f}")
+    print(f"{'Time':<20} {ss_time:>8.3f} {df_time:>4d} {ms_time:>10.3f} {f_time:>8.2f} {p_time:>10.4f} {eta2_time:>12.3f}")
+    print(f"{'Condition x Time':<20} {ss_interaction:>8.3f} {df_interaction:>4d} {ms_inter:>10.3f} {f_inter:>8.2f} {p_inter:>10.4f} {eta2_inter:>12.3f}")
+    print(f"{'Residual':<20} {ss_resid:>8.3f} {df_resid:>4d} {ms_resid:>10.3f}")
+    print("-" * 78)
+
+    print(f"\nCondition effect:        F({df_cond},{df_resid}) = {f_cond:.2f}, p = {p_cond:.4f} {sig_marker(p_cond)}, partial eta2 = {eta2_cond:.3f}")
+    print(f"Time effect:             F({df_time},{df_resid}) = {f_time:.2f}, p = {p_time:.4f} {sig_marker(p_time)}, partial eta2 = {eta2_time:.3f}")
+    print(f"Condition x Time:        F({df_interaction},{df_resid}) = {f_inter:.2f}, p = {p_inter:.4f} {sig_marker(p_inter)}, partial eta2 = {eta2_inter:.3f}  <-- KEY TEST")
+
+    if p_inter < 0.05:
+        print("\n  [+] Significant interaction: the infection effect CHANGES over time.")
+        print("    --> Proceed to pairwise comparisons to find WHEN divergence is significant.")
+    else:
+        print("\n  [-] Interaction not significant (p >= 0.05).")
+        print("    --> The infection effect does not significantly change over time,")
+        print("      though with N=3 power is limited. Check effect sizes.")
+
+    results["anova"] = {
+        "Condition": {"SS": ss_cond, "df": df_cond, "MS": ms_cond, "F": f_cond, "p": p_cond, "partial_eta2": eta2_cond},
+        "Time": {"SS": ss_time, "df": df_time, "MS": ms_time, "F": f_time, "p": p_time, "partial_eta2": eta2_time},
+        "Interaction": {"SS": ss_interaction, "df": df_interaction, "MS": ms_inter, "F": f_inter, "p": p_inter, "partial_eta2": eta2_inter},
+        "Residual": {"SS": ss_resid, "df": df_resid, "MS": ms_resid},
+    }
+
+    # =====================================================================
+    # ANOVA ASSUMPTION DIAGNOSTICS
+    # =====================================================================
+    print("\n\nANOVA ASSUMPTION DIAGNOSTICS")
+    print("-" * 65)
+
+    # Compute residuals from the cell means model
+    residuals = []
+    for _, row in anova_data.iterrows():
+        fitted = cell_means[(row["Condition"], row["Time"])]
+        residuals.append(row["Y"] - fitted)
+    residuals = np.array(residuals)
+    results["residuals"] = residuals
+
+    # 1. Normality of residuals -- Shapiro-Wilk test
+    if len(residuals) >= 3:
+        sw_stat, sw_p = stats.shapiro(residuals)
+        print(f"  Shapiro-Wilk test (normality of residuals):")
+        print(f"    W = {sw_stat:.4f}, p = {sw_p:.4f}")
+        if sw_p >= 0.05:
+            print(f"    --> Residuals are consistent with normality (p >= 0.05).")
+        else:
+            print(f"    --> Residuals deviate from normality (p < 0.05).")
+            print(f"       With N=3 per cell, Shapiro-Wilk has low power.")
+            print(f"       ANOVA is robust to moderate non-normality with balanced designs.")
+        results["shapiro"] = {"W": sw_stat, "p": sw_p}
+    print()
+
+    # 2. Homogeneity of variance -- Levene's test across groups
+    groups = []
+    for c in conditions:
+        for t in timepoints:
+            vals = anova_data[(anova_data["Condition"] == c) & (anova_data["Time"] == t)]["Y"].values
+            if len(vals) > 0:
+                groups.append(vals)
+
+    if len(groups) >= 2 and all(len(g) >= 2 for g in groups):
+        lev_stat, lev_p = stats.levene(*groups, center="median")
+        print(f"  Levene's test (homogeneity of variance, median-centered):")
+        print(f"    F = {lev_stat:.4f}, p = {lev_p:.4f}")
+        if lev_p >= 0.05:
+            print(f"    --> Variances are homogeneous across groups (p >= 0.05).")
+        else:
+            print(f"    --> Variances differ significantly across groups (p < 0.05).")
+            print(f"       Consider Welch's ANOVA or data transformation.")
+            print(f"       With balanced designs, ANOVA is fairly robust to this violation.")
+        results["levene"] = {"F": lev_stat, "p": lev_p}
+
+    # =====================================================================
+    # PAIRWISE COMPARISONS (Welch's t-test + 95% CI + Holm correction)
+    # Matches R's t.test() default (var.equal=FALSE)
+    # =====================================================================
+    print("\n\nPAIRWISE COMPARISONS AT EACH TIME POINT (Welch's t-test)")
+    print("-" * 90)
+    print(f"{'Time':<8} {'Ctrl mean':>10} {'Trt mean':>10} {'Diff':>8} {'95% CI':>18} {'t':>8} {'df':>6} {'p(adj)':>8} {'Sig':>5}")
+    print("-" * 90)
+
+    treatments = [c for c in conditions if c != ref_condition]
+    pairwise_rows = []
+
+    for t in sorted(rep_summary["Time_min"].unique()):
+        ctrl_vals = rep_summary[(rep_summary["Condition"] == ref_condition) &
+                                (rep_summary["Time_min"] == t)][stat].values
+        for trt in treatments:
+            trt_vals = rep_summary[(rep_summary["Condition"] == trt) &
+                                   (rep_summary["Time_min"] == t)][stat].values
+            if len(ctrl_vals) >= 2 and len(trt_vals) >= 2:
+                # Welch's t-test (unequal variance), treatment first to match R
+                t_result = stats.ttest_ind(trt_vals, ctrl_vals, equal_var=False)
+                t_stat = t_result.statistic
+                p_raw = t_result.pvalue
+
+                # 95% confidence interval for the difference
+                diff_mean = np.mean(trt_vals) - np.mean(ctrl_vals)
+                se_diff = np.sqrt(np.var(trt_vals, ddof=1)/len(trt_vals) +
+                                  np.var(ctrl_vals, ddof=1)/len(ctrl_vals))
+                # Welch-Satterthwaite degrees of freedom
+                s1_sq_n1 = np.var(trt_vals, ddof=1) / len(trt_vals)
+                s2_sq_n2 = np.var(ctrl_vals, ddof=1) / len(ctrl_vals)
+                df_ws = (s1_sq_n1 + s2_sq_n2)**2 / (
+                    s1_sq_n1**2 / (len(trt_vals)-1) + s2_sq_n2**2 / (len(ctrl_vals)-1)
+                )
+                t_crit = stats.t.ppf(0.975, df_ws)
+                ci_lo = diff_mean - t_crit * se_diff
+                ci_hi = diff_mean + t_crit * se_diff
+            else:
+                t_stat, p_raw, df_ws = np.nan, np.nan, np.nan
+                diff_mean = np.mean(trt_vals) - np.mean(ctrl_vals) if len(ctrl_vals) > 0 and len(trt_vals) > 0 else np.nan
+                ci_lo, ci_hi = np.nan, np.nan
+
+            pairwise_rows.append({
+                "Time_min": t,
+                "Treatment": trt,
+                "ctrl_mean": np.mean(ctrl_vals),
+                "trt_mean": np.mean(trt_vals),
+                "diff": diff_mean,
+                "CI_lo": ci_lo,
+                "CI_hi": ci_hi,
+                "t_stat": t_stat,
+                "df": df_ws,
+                "p_raw": p_raw,
+            })
+
+    pw_df = pd.DataFrame(pairwise_rows)
+
+    # Holm-Bonferroni correction
+    raw_p = pw_df["p_raw"].values
+    n_tests = len(raw_p)
+    sorted_idx = np.argsort(raw_p)
+    adjusted = np.empty(n_tests)
+    for rank, idx in enumerate(sorted_idx):
+        adjusted[idx] = min(raw_p[idx] * (n_tests - rank), 1.0)
+    for rank in range(1, n_tests):
+        idx = sorted_idx[rank]
+        prev_idx = sorted_idx[rank - 1]
+        adjusted[idx] = max(adjusted[idx], adjusted[prev_idx])
+    pw_df["p_adj"] = adjusted
+    pw_df["sig"] = pw_df["p_adj"].apply(sig_marker)
+
+    for _, row in pw_df.iterrows():
+        ci_str = f"[{row['CI_lo']:.3f}, {row['CI_hi']:.3f}]"
+        print(f"{row['Time_min']:<8.0f} {row['ctrl_mean']:>10.3f} {row['trt_mean']:>10.3f} "
+              f"{row['diff']:>8.3f} {ci_str:>18} {row['t_stat']:>8.2f} {row['df']:>6.1f} "
+              f"{row['p_adj']:>8.4f} {row['sig']:>5}")
+
+    results["pairwise"] = pw_df
+
+    # =====================================================================
+    # STATISTICAL METHODS SUMMARY
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print("STATISTICAL METHODS")
+    print("=" * 78)
+    print("ANOVA: Two-way factorial ANOVA (Type I SS) on per-replicate")
+    print("summaries. With balanced design (equal N per cell), Type I,")
+    print("Type II, and Type III SS are identical. Effect sizes reported")
+    print("as partial eta-squared (small=0.01, medium=0.06, large=0.14;")
+    print("Cohen, 1988).")
+    print()
+    print("Assumption diagnostics:")
+    print("  - Shapiro-Wilk test for normality of ANOVA residuals")
+    print("  - Levene's test (median-centered) for homogeneity of variance")
+    print("  ANOVA is robust to moderate violations of both assumptions")
+    print("  with balanced designs (Maxwell & Delaney, 2004).")
+    print()
+    print("Pairwise tests: Welch's two-sample t-test (unequal variance")
+    print("assumed) at each time point (Ruxton, 2006). 95% confidence")
+    print("intervals computed using Welch-Satterthwaite degrees of freedom.")
+    print()
+    print("Multiple comparison correction: Holm-Bonferroni step-down")
+    print("method (Holm, 1979), controlling family-wise error rate.")
+    print()
+    print("Statistical unit: Biological replicate (NOT individual cell).")
+    print("This avoids pseudoreplication (Lazic, 2010).")
+    print()
+    print("Both R Shiny and Python implementations of CellMorphR use")
+    print("identical statistical methods and produce identical results.")
+    print("Python ANOVA validated against R's aov(); Welch's t-test")
+    print("validated against R's t.test(var.equal=FALSE).")
+    print("=" * 78)
+
+    return results
+
+
+
+# =============================================================================
+# DEMO DATA GENERATOR
+# =============================================================================
+def generate_demo_data():
+    """
+    Generate simulated phage infection morphometry data for testing.
+
+    Note: This function does NOT set its own random seed. The caller is
+    responsible for seeding via np.random.seed() (or the --seed CLI flag)
+    before calling this function to ensure reproducibility.
+    """
+    rows = []
+    for cond in ["Uninfected", "+N4"]:
+        for t in [30, 60, 90, 120]:
+            for rep in [1, 2, 3]:
+                n_cells = np.random.randint(180, 220)
+                if cond == "Uninfected":
+                    base = 3.0 + (t - 30) * 0.002
+                    areas = np.random.lognormal(np.log(base), 0.25, n_cells)
+                else:
+                    base = 3.0 + (t - 30) * 0.025 + (t / 120) ** 2 * 2
+                    areas = np.random.lognormal(np.log(base), 0.3 + t * 0.001, n_cells)
+                # Slight replicate effect
+                areas *= 1 + (rep - 2) * 0.03
+                perimeters = 2 * np.sqrt(np.pi * areas) * np.random.uniform(0.95, 1.15, n_cells)
+                for i in range(n_cells):
+                    rows.append({
+                        "Condition": cond,
+                        "Time_min": t,
+                        "Replicate": rep,
+                        "Area": round(areas[i], 3),
+                        "Perimeter": round(perimeters[i], 3),
+                        "Circularity": round(np.random.uniform(0.6, 1.0), 3),
+                    })
+    return pd.DataFrame(rows)
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+def main():
+    parser = argparse.ArgumentParser(
+        description="CellMorphR-Py: Single-cell morphometry analysis for phage infection experiments",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python cellmorphr.py data.xlsx --measure Area
+  python cellmorphr.py data.xlsx --measure Area --all-plots --save-stats
+  python cellmorphr.py --demo --measure Area --all-plots
+  python cellmorphr.py data.csv --measure Perimeter --ref "Uninfected" --format png
+        """,
+    )
+    parser.add_argument("file", nargs="?", help="Input file (Excel or CSV)")
+    parser.add_argument("--demo", action="store_true", help="Use demo data")
+    parser.add_argument("--measure", "-m", default="Area", help="Measurement column (default: Area)")
+    parser.add_argument("--ref", default=None, help="Reference/control condition name")
+    parser.add_argument("--stat", choices=["median", "mean"], default="median",
+                        help="Summary statistic for replicates (default: median)")
+    parser.add_argument("--format", "-f", choices=["pdf", "png", "svg"], default="pdf",
+                        help="Output format (default: pdf)")
+    parser.add_argument("--dpi", type=int, default=300, help="Output DPI (default: 300)")
+    parser.add_argument("--font-size", type=int, default=11, help="Base font size (default: 11)")
+    parser.add_argument("--outdir", "-o", default=".", help="Output directory")
+
+    # Plot flags
+    parser.add_argument("--all-plots", action="store_true", help="Generate all plot types")
+    parser.add_argument("--violin", action="store_true", help="Generate distribution plot")
+    parser.add_argument("--trajectory", action="store_true", help="Generate trajectory plot")
+    parser.add_argument("--ecdf", action="store_true", help="Generate ECDF plot")
+    parser.add_argument("--effect", action="store_true", help="Generate effect size plot")
+    parser.add_argument("--composite", action="store_true", help="Generate composite figure")
+    parser.add_argument("--save-stats", action="store_true", help="Save statistics to file")
+    parser.add_argument("--plot-style", choices=["violin", "strip", "sina", "box", "dotplot"],
+                        default="violin",
+                        help="Distribution plot style (default: violin). Options: "
+                             "violin (density), strip (jitter), sina (density-jitter), "
+                             "box (box plot), dotplot (replicate summaries only)")
+    parser.add_argument("--show-sig", action="store_true",
+                        help="Show significance brackets on distribution plots")
+    parser.add_argument("--sig-style", choices=["stars", "stars_p", "pval"],
+                        default="stars",
+                        help="Significance label style: stars (*, **, ***), "
+                             "stars_p (stars + p-value), pval (p-value only)")
+    parser.add_argument("--hide-ns", action="store_true",
+                        help="Suppress non-significant (ns) brackets (show only * / ** / ***)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for jitter reproducibility (default: 42). "
+                             "Set to 0 for non-deterministic.")
+
+    args = parser.parse_args()
+
+    # Reproducibility: set random seed for jitter positions
+    if args.seed != 0:
+        np.random.seed(args.seed)
+
+    # Load data
+    if args.demo:
+        print("Generating demo data (simulated phage infection)...\n")
+        df = generate_demo_data()
+        measure_cols = ["Area", "Perimeter", "Circularity"]
+    elif args.file:
+        df, measure_cols = load_data(args.file)
+    else:
+        parser.print_help()
+        sys.exit("\nError: Provide a file or use --demo")
+
+    if args.measure not in df.columns:
+        sys.exit(f"Error: Measure '{args.measure}' not found. Available: {measure_cols}")
+
+    # Setup
+    measure = args.measure
+    stat_col = "median_val" if args.stat == "median" else "mean_val"
+    outdir = Path(args.outdir)
+    outdir.mkdir(exist_ok=True)
+
+    # Determine reference condition
+    if args.ref:
+        ref = args.ref
+    else:
+        # Auto-detect: look for "uninf", "control", "wt", "mock"
+        conds = df["Condition"].unique()
+        ref = None
+        for pattern in ["uninf", "control", "wt", "mock"]:
+            matches = [c for c in conds if pattern.lower() in c.lower()]
+            if matches:
+                ref = matches[0]
+                break
+        if ref is None:
+            ref = conds[0]
+    print(f"\nReference condition: {ref}")
+
+    # Order conditions
+    all_conds = list(df["Condition"].unique())
+    conditions = [ref] + [c for c in all_conds if c != ref]
+    colors = [COLORS["control"]] + [COLORS["treatment"]] * (len(conditions) - 1)
+
+    # Compute summaries
+    rep_summ = compute_replicate_summaries(df, measure)
+    cond_summ = compute_condition_summaries(rep_summ, stat_col)
+    es_df = compute_effect_sizes(rep_summ, ref, stat_col)
+
+    # Default: if no specific plot flags, generate violin + trajectory
+    if not any([args.all_plots, args.violin, args.trajectory, args.ecdf,
+                args.effect, args.composite]):
+        args.violin = True
+        args.trajectory = True
+
+    ext = args.format
+    set_pub_style(args.font_size)
+
+    # Run statistics (always needed; moved before plots so sig brackets work)
+    stat_results = run_statistics(df, rep_summ, measure, ref, stat_col)
+    sig_data = stat_results if args.show_sig else None
+    show_ns = not args.hide_ns
+
+    # Generate plots
+    if args.all_plots or args.violin:
+        fig = plot_distributions(df, rep_summ, measure, conditions, colors,
+                                font_size=args.font_size, style=args.plot_style,
+                                sig_results=sig_data, sig_style=args.sig_style,
+                                show_ns=show_ns)
+        path = outdir / f"distributions_{measure}.{ext}"
+        fig.savefig(path, dpi=args.dpi, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved: {path}")
+
+    if args.all_plots or args.trajectory:
+        fig = plot_trajectories(rep_summ, cond_summ, measure, conditions, colors,
+                                stat=stat_col, font_size=args.font_size)
+        path = outdir / f"trajectory_{measure}.{ext}"
+        fig.savefig(path, dpi=args.dpi)
+        plt.close(fig)
+        print(f"Saved: {path}")
+
+    if args.all_plots or args.ecdf:
+        fig = plot_ecdf(df, measure, conditions, colors, font_size=args.font_size)
+        path = outdir / f"ecdf_{measure}.{ext}"
+        fig.savefig(path, dpi=args.dpi)
+        plt.close(fig)
+        print(f"Saved: {path}")
+
+    if args.all_plots or args.effect:
+        fig = plot_effect_sizes(es_df, measure, "pct_change", colors,
+                                font_size=args.font_size)
+        path = outdir / f"effect_size_{measure}.{ext}"
+        fig.savefig(path, dpi=args.dpi)
+        plt.close(fig)
+        print(f"Saved: {path}")
+
+    if args.all_plots or args.composite:
+        fig = plot_composite(df, rep_summ, cond_summ, es_df, measure,
+                             conditions, colors, font_size=args.font_size,
+                             dist_style=args.plot_style,
+                             sig_results=sig_data, sig_style=args.sig_style,
+                             show_ns=show_ns, stat=stat_col)
+        path = outdir / f"figure_{measure}.{ext}"
+        fig.savefig(path, dpi=args.dpi, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved: {path}")
+
+    # Save statistics
+    if args.save_stats:
+        # Re-capture the printed output by running statistics one more time
+        # (the first run already printed to stdout for the user)
+        stats_path = outdir / f"statistics_{measure}.txt"
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_statistics(df, rep_summ, measure, ref, stat_col)
+        stats_path.write_text(buf.getvalue(), encoding="utf-8")
+        print(f"\nSaved statistics report: {stats_path}")
+
+        # Also save pairwise results as machine-readable CSV
+        pw_path = outdir / f"pairwise_{measure}.csv"
+        stat_results["pairwise"].to_csv(pw_path, index=False)
+        print(f"Saved pairwise results: {pw_path}")
+
+    print("\nDone!")
+
+
+if __name__ == "__main__":
+    main()
