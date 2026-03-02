@@ -1,0 +1,1593 @@
+# =============================================================================
+# CellMorphR -- Single-Cell Morphometry Analysis Suite
+# Version 1.0.0
+# For time-resolved microscopy experiments (e.g., bacteriophage infection)
+#
+# Citation:
+#   [Author(s)]. CellMorphR: Single-cell morphometry analysis with
+#   anti-pseudoreplication statistics. Version 1.0.0.
+#   URL: https://github.com/mbaffour/CellMorphR
+# =============================================================================
+# Required packages (install once):
+# install.packages(c("shiny", "bslib", "ggplot2", "dplyr", "tidyr", "readxl",
+#                     "lme4", "lmerTest", "emmeans", "ggridges", "patchwork",
+#                     "colourpicker", "DT", "writexl", "scales", "ggbeeswarm"))
+
+library(shiny)
+library(bslib)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(DT)
+library(scales)
+
+# Attempt to load optional packages
+has_lme4     <- requireNamespace("lme4", quietly = TRUE)
+has_lmerTest <- requireNamespace("lmerTest", quietly = TRUE)
+has_emmeans  <- requireNamespace("emmeans", quietly = TRUE)
+has_ridges   <- requireNamespace("ggridges", quietly = TRUE)
+has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
+has_writexl  <- requireNamespace("writexl", quietly = TRUE)
+has_beeswarm <- requireNamespace("ggbeeswarm", quietly = TRUE)
+has_colourpicker <- requireNamespace("colourpicker", quietly = TRUE)
+
+# =============================================================================
+# THEME
+# =============================================================================
+app_theme <- bs_theme(
+  version     = 5,
+  bootswatch  = "flatly",
+  primary     = "#2C3E50",
+  secondary   = "#18BC9C",
+  success     = "#18BC9C",
+  info        = "#3498DB",
+  font_scale  = 0.92,
+  "navbar-bg" = "#2C3E50"
+)
+
+# =============================================================================
+# PUBLICATION GGPLOT THEME
+# =============================================================================
+theme_publication <- function(base_size = 12) {
+  theme_classic(base_size = base_size) %+replace%
+    theme(
+      # Text
+      text             = element_text(family = "sans", color = "black"),
+      plot.title       = element_text(face = "bold", size = rel(1.15), hjust = 0,
+                                      margin = margin(b = 8)),
+      plot.subtitle    = element_text(size = rel(0.85), hjust = 0, color = "grey40",
+                                      margin = margin(b = 10)),
+      # Axes
+      axis.title       = element_text(face = "bold", size = rel(1)),
+      axis.text        = element_text(size = rel(0.9), color = "black"),
+      axis.line        = element_line(color = "black", linewidth = 0.5),
+      axis.ticks       = element_line(color = "black", linewidth = 0.4),
+      # Legend
+      legend.title     = element_text(face = "bold", size = rel(0.9)),
+      legend.text      = element_text(size = rel(0.85)),
+      legend.background = element_blank(),
+      legend.key       = element_blank(),
+      legend.position  = "top",
+      # Panel
+      panel.background = element_blank(),
+      panel.grid       = element_blank(),
+      strip.background = element_rect(fill = "grey95", color = NA),
+      strip.text       = element_text(face = "bold", size = rel(0.9)),
+      # Margins
+      plot.margin      = margin(12, 12, 12, 12)
+    )
+}
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+validate_data <- function(df) {
+  required <- c("Condition", "Time_min", "Replicate")
+  missing  <- setdiff(required, names(df))
+  if (length(missing) > 0) {
+    return(list(ok = FALSE,
+                msg = paste("Missing required columns:", paste(missing, collapse = ", "),
+                            "\n\nYour file must contain: Condition, Time_min, Replicate,",
+                            "and at least one numeric measurement column (e.g., Area).")))
+  }
+  # Find numeric measurement columns (exclude metadata)
+  meta_cols <- c("Condition", "Time_min", "Replicate", "Image", "Cell_ID")
+  measure_cols <- setdiff(names(df), meta_cols)
+  measure_cols <- measure_cols[sapply(df[measure_cols], is.numeric)]
+  if (length(measure_cols) == 0) {
+    return(list(ok = FALSE,
+                msg = "No numeric measurement columns found beyond metadata columns."))
+  }
+  list(ok = TRUE, msg = "Data validated successfully.", measures = measure_cols)
+}
+
+compute_replicate_summaries <- function(df, measure) {
+  df %>%
+    group_by(Condition, Time_min, Replicate) %>%
+    summarise(
+      median_val = median(.data[[measure]], na.rm = TRUE),
+      mean_val   = mean(.data[[measure]], na.rm = TRUE),
+      sd_val     = sd(.data[[measure]], na.rm = TRUE),
+      n_cells    = n(),
+      q25        = quantile(.data[[measure]], 0.25, na.rm = TRUE),
+      q75        = quantile(.data[[measure]], 0.75, na.rm = TRUE),
+      .groups    = "drop"
+    )
+}
+
+compute_condition_summaries <- function(rep_summary) {
+  rep_summary %>%
+    group_by(Condition, Time_min) %>%
+    summarise(
+      grand_median = mean(median_val),   # mean of per-replicate medians
+      grand_mean   = mean(mean_val),     # mean of per-replicate means
+      sem_median   = sd(median_val) / sqrt(n()),
+      sem_mean     = sd(mean_val) / sqrt(n()),
+      n_reps       = n(),
+      .groups      = "drop"
+    )
+}
+
+# =============================================================================
+# UI
+# =============================================================================
+ui <- page_navbar(
+  title = tags$span(
+    tags$strong("CellMorphR"),
+    tags$span(" | Single-Cell Morphometry Analysis", style = "font-weight:300; opacity:0.8;")
+  ),
+  theme = app_theme,
+  fillable = TRUE,
+
+  # --- TAB 1: DATA -----------------------------------------------------------
+  nav_panel(
+    title = "Data",
+    icon  = icon("upload"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 320,
+        title = "Upload & Configure",
+        fileInput("file", "Upload Data File",
+                  accept = c(".xlsx", ".xls", ".csv", ".tsv"),
+                  placeholder = "Excel or CSV"),
+        tags$hr(),
+        tags$p(tags$strong("Required columns:"), class = "mb-1"),
+        tags$ul(class = "small",
+          tags$li(tags$code("Condition"), " — e.g., Uninfected, +N4"),
+          tags$li(tags$code("Time_min"), " — numeric (30, 60, 90, 120)"),
+          tags$li(tags$code("Replicate"), " — biological replicate ID (1, 2, 3)")
+        ),
+        tags$p(class = "small text-muted",
+               "Plus one or more numeric measurement columns (Area, Perimeter, etc.)"),
+        tags$hr(),
+        uiOutput("measure_selector"),
+        uiOutput("condition_order_ui"),
+        tags$hr(),
+        actionButton("load_demo", "Load Demo Data", class = "btn-outline-secondary btn-sm w-100"),
+        tags$p(class = "small text-muted mt-2",
+               "Generates simulated phage infection data for testing.")
+      ),
+      # Main panel
+      card(
+        card_header("Data Preview"),
+        DTOutput("data_table")
+      ),
+      layout_columns(
+        col_widths = c(4, 4, 4),
+        value_box(
+          title = "Total Cells", value = textOutput("n_cells_txt"),
+          showcase = icon("microscope"), theme = "primary"
+        ),
+        value_box(
+          title = "Conditions × Time Points", value = textOutput("n_groups_txt"),
+          showcase = icon("layer-group"), theme = "secondary"
+        ),
+        value_box(
+          title = "Biological Replicates", value = textOutput("n_reps_txt"),
+          showcase = icon("flask"), theme = "info"
+        )
+      )
+    )
+  ),
+
+  # --- TAB 2: DISTRIBUTIONS --------------------------------------------------
+  nav_panel(
+    title = "Distributions",
+    icon  = icon("chart-area"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 300,
+        title = "Plot Options",
+        radioButtons("dist_type", "Plot Type",
+                     choices = c("Violin + Jittered Medians" = "violin",
+                                 "Strip (Jitter)" = "strip",
+                                 "Sina (Density-Jitter)" = "sina",
+                                 "Box + Strip" = "boxstrip",
+                                 "Dot Plot (Replicates Only)" = "dotplot",
+                                 "Ridge Plot" = "ridge",
+                                 "ECDF" = "ecdf"),
+                     selected = "violin"),
+        tags$hr(),
+        checkboxInput("show_rep_medians", "Show replicate medians", TRUE),
+        checkboxInput("show_cell_points", "Show individual cells", FALSE),
+        conditionalPanel(
+          "input.show_cell_points",
+          sliderInput("point_alpha", "Point opacity", 0.02, 0.5, 0.08, 0.02)
+        ),
+        tags$hr(),
+        checkboxInput("show_sig", "Show significance brackets", FALSE),
+        conditionalPanel(
+          "input.show_sig",
+          radioButtons("sig_label_style", "Label style",
+                       choices = c("Stars (*, **, ***)" = "stars",
+                                   "Stars + p-value" = "stars_p",
+                                   "p-value only" = "pval"),
+                       selected = "stars", inline = FALSE),
+          checkboxInput("show_ns", "Show non-significant (ns) brackets", TRUE),
+          tags$div(class = "alert alert-info py-1 px-2 mt-2 small", role = "alert",
+            tags$strong("Statistical test:"), "Welch's two-sample",
+            tags$em("t"), "-test (two-sided) on per-replicate medians",
+            "(N = biological replicates per group, ", tags$strong("not"), " individual cells).",
+            tags$br(),
+            tags$strong("Correction:"), "Holm–Bonferroni for multiple time-point comparisons.",
+            tags$br(),
+            tags$strong("Thresholds:"), "* p < 0.05, ** p < 0.01, *** p < 0.001.",
+            tags$br(),
+            "Not available for Ridge or ECDF."
+          )
+        ),
+        tags$hr(),
+        sliderInput("dist_base_size", "Font size", 8, 18, 12, 1),
+        numericInput("dist_width", "Width (in)", 8, 3, 16, 0.5),
+        numericInput("dist_height", "Height (in)", 5, 2, 12, 0.5),
+        numericInput("dist_dpi", "DPI", 300, 72, 600, 50),
+        selectInput("dist_format", "File format",
+                    choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg",
+                                "TIFF" = "tiff", "EPS" = "eps"),
+                    selected = "pdf"),
+        tags$hr(),
+        downloadButton("dl_dist", "Download Figure", class = "btn-primary w-100")
+      ),
+      card(
+        card_header("Single-Cell Distributions by Condition × Time"),
+        plotOutput("dist_plot", height = "560px")
+      ),
+      card(
+        card_header(
+          tags$span(icon("circle-info"), " Why This Plot?")
+        ),
+        class = "border-info",
+        tags$div(class = "p-2 small",
+          tags$p(tags$strong("Violin plots"), "show the full probability density of single-cell
+                  measurements. Width represents the kernel density estimate — wider regions
+                  mean more cells at that value. Best for revealing multimodality and skewness
+                  in large datasets (~200+ cells per group)."),
+          tags$p(tags$strong("Strip (Jitter)"), "shows every individual cell as a point.
+                  This is the most transparent visualization — nothing is smoothed or
+                  summarized. Widely used in eLife, Nature Methods, and PLOS Biology."),
+          tags$p(tags$strong("Sina plot"), "combines the best of violin and strip: point
+                  spread follows the density (wide where data is dense, narrow where sparse).
+                  Gives distribution shape without the smoothing artifacts of violins.
+                  Requires the ggforce package."),
+          tags$p(tags$strong("Dot plot (Replicates Only)"), "shows ONLY the per-replicate
+                  medians (N=3 per group) — the actual data points used in the ANOVA.
+                  This is the most honest representation of your statistical power and
+                  is what SuperPlots (Lord et al., 2020) recommend."),
+          tags$p(tags$strong("Box + Strip"), "combines box plots (quartiles) with replicate
+                  medians. Box plots are familiar to most reviewers but hide distribution
+                  shape."),
+          tags$p(tags$strong("Overlaid replicate medians"), "(colored dots on violin, strip,
+                  and sina plots) are critical.
+                  Each dot is the median of one biological replicate — your true independent
+                  observations. With N=3 replicates per group, these 3 dots honestly convey
+                  your statistical power. The hundreds of cells within each violin/strip are
+                  technical measurements of those 3 biological units."),
+          tags$p(tags$strong("Why not plot all cells as independent?"), "Cells from the same
+                  dish are correlated — they share the same culture conditions, infection event,
+                  and imaging session. Treating them as independent (pseudoreplication) inflates
+                  your sample size ~200-fold and produces artificially tiny p-values. Reviewers
+                  at high-impact journals will flag this immediately.")
+        )
+      )
+    )
+  ),
+
+  # --- TAB 3: TRAJECTORIES ---------------------------------------------------
+  nav_panel(
+    title = "Trajectories",
+    icon  = icon("chart-line"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 300,
+        title = "Plot Options",
+        radioButtons("traj_summary", "Summary Statistic",
+                     choices = c("Median" = "median_val", "Mean" = "mean_val"),
+                     selected = "median_val"),
+        checkboxInput("traj_smooth", "Add trend line (loess)", TRUE),
+        checkboxInput("traj_error", "Show SEM ribbon", TRUE),
+        checkboxInput("traj_connect_reps", "Connect individual replicates", TRUE),
+        tags$hr(),
+        radioButtons("traj_style", "Style",
+                     choices = c("Points + Lines" = "pointline",
+                                 "Points + Ribbon" = "ribbon"),
+                     selected = "pointline"),
+        tags$hr(),
+        sliderInput("traj_base_size", "Font size", 8, 18, 12, 1),
+        numericInput("traj_width", "Width (in)", 6, 3, 16, 0.5),
+        numericInput("traj_height", "Height (in)", 4.5, 2, 12, 0.5),
+        numericInput("traj_dpi", "DPI", 300, 72, 600, 50),
+        selectInput("traj_format", "File format",
+                    choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg",
+                                "TIFF" = "tiff", "EPS" = "eps"),
+                    selected = "pdf"),
+        tags$hr(),
+        downloadButton("dl_traj", "Download Figure", class = "btn-primary w-100")
+      ),
+      card(
+        card_header("Temporal Trajectory — Replicate-Level Summaries"),
+        plotOutput("traj_plot", height = "500px")
+      ),
+      card(
+        card_header(tags$span(icon("circle-info"), " Why This Plot?")),
+        class = "border-info",
+        tags$div(class = "p-2 small",
+          tags$p(tags$strong("This is your key figure."), "It plots the median cell measurement
+                  from each biological replicate over time, separately for each condition.
+                  Each line/point represents one independent biological observation."),
+          tags$p(tags$strong("The interaction is the story."), "If infection increases cell size
+                  over time, you should see the +N4 trajectories pulling away from uninfected
+                  as time progresses. Parallel lines mean no differential effect; diverging
+                  lines mean the infection effect depends on time — a condition × time interaction."),
+          tags$p(tags$strong("SEM ribbons"), "show the standard error of the per-replicate
+                  medians (N=3), giving an honest picture of biological variability. This is
+                  very different from SEM computed over all cells, which would be misleadingly
+                  small."),
+          tags$p(tags$strong("Why per-replicate medians?"), "The median of ~200 cells from one
+                  dish is your single best estimate of cell size in that biological replicate.
+                  It's robust to outliers and skewness. The replicate medians are then your
+                  true data points for inference (N=3 per group).")
+        )
+      )
+    )
+  ),
+
+  # --- TAB 4: STATISTICS -----------------------------------------------------
+  nav_panel(
+    title = "Statistics",
+    icon  = icon("square-root-variable"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 300,
+        title = "Analysis Options",
+        radioButtons("stat_summary", "Summarize cells by",
+                     choices = c("Median" = "median_val", "Mean" = "mean_val"),
+                     selected = "median_val"),
+        tags$hr(),
+        radioButtons("stat_method", "Analysis Method",
+                     choices = c(
+                       "Two-way ANOVA (on replicate summaries)" = "anova",
+                       "Linear Mixed Model (if available)" = "lmm"
+                     ), selected = "anova"),
+        tags$hr(),
+        actionButton("run_stats", "Run Analysis", class = "btn-primary w-100",
+                     icon = icon("play")),
+        tags$hr(),
+        downloadButton("dl_stats", "Download Results", class = "btn-outline-primary w-100")
+      ),
+      card(
+        card_header("Statistical Results"),
+        verbatimTextOutput("stat_output")
+      ),
+      card(
+        card_header("Pairwise Comparisons at Each Time Point"),
+        DTOutput("pairwise_table")
+      ),
+      card(
+        card_header(tags$span(icon("circle-info"), " Understanding the Analysis")),
+        class = "border-info",
+        tags$div(class = "p-2 small",
+          tags$p(tags$strong("Step 1: Collapse cells to replicate-level summaries."),
+                 "We compute the median (or mean) of all cells within each biological replicate.
+                  This gives us one value per replicate — our true independent observations.
+                  With 2 conditions × 4 time points × 3 replicates = 24 data points total."),
+          tags$p(tags$strong("Step 2: Two-way ANOVA (or mixed model)."),
+                 "We test three things on these 24 values:"),
+          tags$ul(
+            tags$li(tags$strong("Main effect of Condition:"), " Are infected cells larger overall?"),
+            tags$li(tags$strong("Main effect of Time:"), " Does cell size change over time regardless of condition?"),
+            tags$li(tags$strong("Condition × Time interaction:"), " THE KEY TEST. Does the infection
+                     effect change over time? A significant interaction means the gap between
+                     conditions widens (or narrows) as time progresses.")
+          ),
+          tags$p(tags$strong("Step 3: Pairwise comparisons."),
+                 "If the interaction is significant, we compare conditions at each time point
+                  separately (with multiplicity correction) to identify exactly when the
+                  divergence becomes statistically significant."),
+          tags$p(tags$strong("Why not test cell-level data?"),
+                 "Testing all ~4,800 cells as independent observations would be pseudoreplication.
+                  Your true N is 3 replicates per group, not hundreds of cells. A t-test on
+                  all cells would give p < 0.0001 even for trivially small differences,
+                  because the massive 'N' makes the standard error vanishingly small.
+                  The replicate-level analysis gives honest p-values reflecting your actual
+                  experimental power.")
+        )
+      )
+    )
+  ),
+
+  # --- TAB 5: EFFECT SIZES ---------------------------------------------------
+  nav_panel(
+    title = "Effect Sizes",
+    icon  = icon("arrows-left-right"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 300,
+        title = "Options",
+        radioButtons("es_summary", "Summary Statistic",
+                     choices = c("Median" = "median_val", "Mean" = "mean_val"),
+                     selected = "median_val"),
+        radioButtons("es_type", "Effect Size Metric",
+                     choices = c(
+                       "Absolute difference" = "abs_diff",
+                       "Percent change from Uninfected" = "pct_change",
+                       "Cohen's d (replicate-level)" = "cohens_d"
+                     ), selected = "pct_change"),
+        tags$hr(),
+        sliderInput("es_base_size", "Font size", 8, 18, 12, 1),
+        numericInput("es_width", "Width (in)", 6, 3, 16, 0.5),
+        numericInput("es_height", "Height (in)", 4, 2, 12, 0.5),
+        numericInput("es_dpi", "DPI", 300, 72, 600, 50),
+        selectInput("es_format", "File format",
+                    choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg",
+                                "TIFF" = "tiff", "EPS" = "eps"),
+                    selected = "pdf"),
+        tags$hr(),
+        downloadButton("dl_es", "Download Figure", class = "btn-primary w-100")
+      ),
+      card(
+        card_header("Effect Size Over Time"),
+        plotOutput("es_plot", height = "450px")
+      ),
+      card(
+        card_header("Effect Size Table"),
+        DTOutput("es_table")
+      ),
+      card(
+        card_header(tags$span(icon("circle-info"), " Why Effect Sizes?")),
+        class = "border-info",
+        tags$div(class = "p-2 small",
+          tags$p("P-values tell you whether an effect exists; effect sizes tell you",
+                 tags$strong("how big"), "the effect is. With small N (3 replicates),
+                 even real biological effects may not reach p < 0.05 — but a consistent
+                 30% increase in cell area across replicates is biologically meaningful
+                 regardless of p-value."),
+          tags$p(tags$strong("Percent change"), "is intuitive: 'Infected cells are 25% larger
+                  at 120 min.' This communicates biological magnitude directly."),
+          tags$p(tags$strong("Cohen's d"), "standardizes the difference by variability between
+                  replicates. d > 0.8 is conventionally 'large', but in tightly controlled
+                  experiments, even d = 0.5 may be meaningful.")
+        )
+      )
+    )
+  ),
+
+  # --- TAB 6: MULTI-PANEL FIGURE ---------------------------------------------
+  nav_panel(
+    title = "Publication Figure",
+    icon  = icon("image"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 300,
+        title = "Figure Options",
+        checkboxGroupInput("pub_panels", "Include panels:",
+                           choices = c(
+                             "A: Distributions" = "dist",
+                             "B: Trajectories" = "traj",
+                             "C: Effect sizes" = "effect"
+                           ),
+                           selected = c("dist", "traj")),
+        tags$hr(),
+        sliderInput("pub_base_size", "Font size", 8, 18, 11, 1),
+        numericInput("pub_width", "Width (in)", 10, 4, 20, 0.5),
+        numericInput("pub_height", "Height (in)", 5, 3, 14, 0.5),
+        numericInput("pub_dpi", "DPI", 300, 72, 600, 50),
+        selectInput("pub_format", "File format",
+                    choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg",
+                                "TIFF" = "tiff", "EPS" = "eps"),
+                    selected = "pdf"),
+        tags$hr(),
+        downloadButton("dl_pub", "Download Figure", class = "btn-primary w-100")
+      ),
+      card(
+        card_header("Composite Publication Figure"),
+        plotOutput("pub_plot", height = "580px")
+      )
+    )
+  ),
+
+  # --- FOOTER -----------------------------------------------------------------
+  nav_spacer(),
+  nav_item(
+    tags$span(class = "navbar-text small",
+              "CellMorphR v1.0 | Built for bacteriophage morphometry research")
+  )
+)
+
+
+# =============================================================================
+# SERVER
+# =============================================================================
+server <- function(input, output, session) {
+
+  # ---------------------------------------------------------------------------
+  # HELPER: Save figures in multiple formats (PDF, PNG, SVG, TIFF, EPS)
+  # ---------------------------------------------------------------------------
+  save_figure <- function(file, plot_obj, width, height, dpi, format) {
+    # TIFF: use LZW compression to keep file size reasonable
+    if (format == "tiff") {
+      ggsave(file, plot_obj, width = width, height = height,
+             dpi = dpi, device = "tiff", compression = "lzw", bg = "white")
+    # EPS: use cairo_ps device for better font embedding
+    } else if (format == "eps") {
+      ggsave(file, plot_obj, width = width, height = height,
+             dpi = dpi, device = cairo_ps, bg = "white")
+    # SVG: use svglite if available, otherwise base svg
+    } else if (format == "svg") {
+      if (requireNamespace("svglite", quietly = TRUE)) {
+        ggsave(file, plot_obj, width = width, height = height,
+               dpi = dpi, device = svglite::svglite)
+      } else {
+        ggsave(file, plot_obj, width = width, height = height,
+               dpi = dpi, device = "svg")
+      }
+    # PNG: always white background
+    } else if (format == "png") {
+      ggsave(file, plot_obj, width = width, height = height,
+             dpi = dpi, device = "png", bg = "white")
+    # PDF: default
+    } else {
+      ggsave(file, plot_obj, width = width, height = height,
+             dpi = dpi, device = "pdf")
+    }
+  }
+
+  # Helper: get file extension string for downloadHandler filename
+  fmt_ext <- function(format) {
+    format  # format values already match extensions: pdf, png, svg, tiff, eps
+  }
+
+  # ---------------------------------------------------------------------------
+  # REACTIVE: loaded data
+  # ---------------------------------------------------------------------------
+  raw_data <- reactiveVal(NULL)
+  measure_cols <- reactiveVal(NULL)
+
+  # File upload
+  observeEvent(input$file, {
+    req(input$file)
+    ext <- tools::file_ext(input$file$name)
+    df <- tryCatch({
+      if (ext %in% c("xlsx", "xls")) {
+        readxl::read_excel(input$file$datapath)
+      } else if (ext == "csv") {
+        read.csv(input$file$datapath, stringsAsFactors = FALSE)
+      } else if (ext == "tsv") {
+        read.delim(input$file$datapath, stringsAsFactors = FALSE)
+      }
+    }, error = function(e) NULL)
+
+    if (is.null(df)) {
+      showNotification("Failed to read file.", type = "error")
+      return()
+    }
+    val <- validate_data(df)
+    if (!val$ok) {
+      showNotification(val$msg, type = "error", duration = 10)
+      return()
+    }
+    # Ensure types
+    df$Condition <- as.character(df$Condition)
+    df$Time_min  <- as.numeric(df$Time_min)
+    df$Replicate <- as.factor(df$Replicate)
+    raw_data(df)
+    measure_cols(val$measures)
+    showNotification(paste("Loaded", nrow(df), "cells,", length(val$measures), "measures."),
+                     type = "message")
+  })
+
+  # Demo data generator
+  observeEvent(input$load_demo, {
+    set.seed(42)
+    conditions <- c("Uninfected", "+N4")
+    times      <- c(30, 60, 90, 120)
+    reps       <- 1:3
+    rows <- list()
+    for (cond in conditions) {
+      for (tm in times) {
+        for (rp in reps) {
+          n_cells <- sample(180:220, 1)
+          # Uninfected: stable ~3 µm² with slight growth
+          # +N4: grows increasingly over time (lysis inhibition → filamentation)
+          if (cond == "Uninfected") {
+            base_area <- 3.0 + (tm - 30) * 0.002
+            areas <- rlnorm(n_cells, log(base_area), 0.25)
+          } else {
+            base_area <- 3.0 + (tm - 30) * 0.025 + (tm / 120)^2 * 2
+            areas <- rlnorm(n_cells, log(base_area), 0.3 + tm * 0.001)
+          }
+          # Add slight replicate effect
+          areas <- areas * (1 + (rp - 2) * 0.03)
+          perimeters <- 2 * sqrt(pi * areas) * runif(n_cells, 0.95, 1.15)
+          rows[[length(rows) + 1]] <- data.frame(
+            Condition = cond,
+            Time_min  = tm,
+            Replicate = rp,
+            Area      = round(areas, 3),
+            Perimeter = round(perimeters, 3),
+            Circularity = round(runif(n_cells, 0.6, 1.0), 3)
+          )
+        }
+      }
+    }
+    df <- bind_rows(rows)
+    df$Replicate <- as.factor(df$Replicate)
+    raw_data(df)
+    measure_cols(c("Area", "Perimeter", "Circularity"))
+    showNotification("Demo data loaded (simulated phage infection).", type = "message")
+  })
+
+  # Measure selector
+  output$measure_selector <- renderUI({
+    req(measure_cols())
+    selectInput("measure", "Measurement Variable", choices = measure_cols(),
+                selected = measure_cols()[1])
+  })
+
+  # Condition order
+  output$condition_order_ui <- renderUI({
+    req(raw_data())
+    conds <- unique(raw_data()$Condition)
+    selectInput("ref_condition", "Reference (control) condition",
+                choices = conds,
+                selected = {
+                  idx <- grep("uninf|control|wt|mock", conds, ignore.case = TRUE)
+                  if (length(idx) > 0) conds[idx[1]] else conds[1]
+                })
+  })
+
+  # Ordered data reactive
+  plot_data <- reactive({
+    req(raw_data(), input$ref_condition)
+    df <- raw_data()
+    # Set reference condition first
+    conds <- unique(df$Condition)
+    conds <- c(input$ref_condition, setdiff(conds, input$ref_condition))
+    df$Condition <- factor(df$Condition, levels = conds)
+    df$Time_min  <- as.numeric(df$Time_min)
+    df
+  })
+
+  # Colour palette reactive
+  cond_colors <- reactive({
+    req(plot_data())
+    n <- length(levels(plot_data()$Condition))
+    if (n == 2) {
+      c("#4A90D9", "#D94A4A")  # Blue for control, Red for treatment
+    } else {
+      scales::hue_pal()(n)
+    }
+  })
+
+  # Replicate summaries
+  rep_summ <- reactive({
+    req(plot_data(), input$measure)
+    compute_replicate_summaries(plot_data(), input$measure)
+  })
+
+  cond_summ <- reactive({
+    req(rep_summ())
+    compute_condition_summaries(rep_summ())
+  })
+
+  # ---------------------------------------------------------------------------
+  # DATA TAB
+  # ---------------------------------------------------------------------------
+  output$data_table <- renderDT({
+    req(raw_data())
+    datatable(head(raw_data(), 500),
+              options = list(pageLength = 15, scrollX = TRUE),
+              caption = "Showing first 500 rows")
+  })
+  output$n_cells_txt  <- renderText({
+    req(raw_data()); format(nrow(raw_data()), big.mark = ",")
+  })
+  output$n_groups_txt <- renderText({
+    req(raw_data())
+    nc <- length(unique(raw_data()$Condition))
+    nt <- length(unique(raw_data()$Time_min))
+    paste0(nc, " × ", nt, " = ", nc * nt)
+  })
+  output$n_reps_txt <- renderText({
+    req(raw_data())
+    paste(length(unique(raw_data()$Replicate)), "per group")
+  })
+
+  # ---------------------------------------------------------------------------
+  # DISTRIBUTIONS TAB
+  # ---------------------------------------------------------------------------
+  dist_plot_obj <- reactive({
+    req(plot_data(), input$measure, input$dist_type)
+    df  <- plot_data()
+    m   <- input$measure
+    rs  <- rep_summ()
+    cols <- cond_colors()
+
+    # Factor time for discrete x-axis
+    df$Time_fac <- factor(paste0(df$Time_min, " min"),
+                          levels = paste0(sort(unique(df$Time_min)), " min"))
+    rs$Time_fac <- factor(paste0(rs$Time_min, " min"),
+                          levels = paste0(sort(unique(rs$Time_min)), " min"))
+
+    if (input$dist_type == "violin") {
+      p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
+        geom_violin(position = position_dodge(0.8), alpha = 0.7,
+                    scale = "width", linewidth = 0.3, color = "grey30") +
+        scale_fill_manual(values = cols)
+
+      if (input$show_cell_points) {
+        p <- p + geom_point(position = position_jitterdodge(
+          jitter.width = 0.15, dodge.width = 0.8),
+          size = 0.3, alpha = input$point_alpha, color = "grey30")
+      }
+      if (input$show_rep_medians) {
+        p <- p + geom_point(data = rs,
+                            aes(x = Time_fac, y = median_val, fill = Condition, group = Condition),
+                            position = position_dodge(0.8),
+                            shape = 21, size = 3.5, color = "black", stroke = 0.8) +
+          geom_point(data = rs,
+                     aes(x = Time_fac, y = median_val, fill = Condition, group = Condition),
+                     position = position_dodge(0.8),
+                     shape = 21, size = 3.5, color = "black", stroke = 0.0, alpha = 0.8)
+      }
+      p <- p + labs(x = "Time Post-Infection", y = m,
+                    title = paste("Single-Cell", m, "Distributions"),
+                    subtitle = "Violins = cell distributions; points = per-replicate medians (N=3)")
+
+    } else if (input$dist_type == "ridge" && has_ridges) {
+      df$Group <- interaction(df$Condition, df$Time_fac, sep = " | ")
+      # Order: by time then condition (reversed for top-to-bottom)
+      group_levels <- rev(as.character(
+        interaction(
+          rep(levels(df$Condition), length(levels(df$Time_fac))),
+          rep(levels(df$Time_fac), each = length(levels(df$Condition))),
+          sep = " | "
+        )
+      ))
+      df$Group <- factor(df$Group, levels = group_levels)
+      p <- ggplot(df, aes(x = .data[[m]], y = Group, fill = Condition)) +
+        ggridges::geom_density_ridges(alpha = 0.7, scale = 1.3, linewidth = 0.3) +
+        scale_fill_manual(values = cols) +
+        labs(x = m, y = NULL, title = paste("Ridge Plot —", m))
+
+    } else if (input$dist_type == "strip") {
+      # Strip / jitter plot: all individual cells as points
+      p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], color = Condition)) +
+        geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7),
+                   size = 0.6, alpha = 0.15) +
+        scale_color_manual(values = cols)
+      if (input$show_rep_medians) {
+        p <- p + stat_summary(aes(group = Condition), fun = median, geom = "crossbar",
+                              position = position_dodge(0.7),
+                              width = 0.3, linewidth = 0.5, color = "black", alpha = 0.7) +
+          geom_point(data = rs,
+                     aes(x = Time_fac, y = median_val, group = Condition),
+                     position = position_dodge(0.7),
+                     shape = 21, size = 3.5, fill = "white", color = "black", stroke = 0.8)
+      }
+      p <- p + labs(x = "Time Post-Infection", y = m,
+                    title = paste("Single-Cell", m, "— Jitter Plot"),
+                    subtitle = "Each point = one cell; crossbar = group median; circles = replicate medians (N=3)")
+
+    } else if (input$dist_type == "sina") {
+      # Sina plot: jitter width follows the density (like a violin made of points)
+      # Uses ggforce::geom_sina if available, else fallback to density-scaled jitter
+      if (requireNamespace("ggforce", quietly = TRUE)) {
+        p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], color = Condition)) +
+          ggforce::geom_sina(position = position_dodge(0.8),
+                             size = 0.5, alpha = 0.15, maxwidth = 0.35) +
+          scale_color_manual(values = cols)
+      } else {
+        # Fallback: regular jitter if ggforce not installed
+        p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], color = Condition)) +
+          geom_point(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+                     size = 0.5, alpha = 0.15) +
+          scale_color_manual(values = cols)
+      }
+      if (input$show_rep_medians) {
+        p <- p + geom_point(data = rs,
+                            aes(x = Time_fac, y = median_val, group = Condition),
+                            position = position_dodge(0.8),
+                            shape = 21, size = 3.5, fill = "white", color = "black", stroke = 0.8)
+      }
+      p <- p + labs(x = "Time Post-Infection", y = m,
+                    title = paste("Single-Cell", m, "— Sina Plot"),
+                    subtitle = "Point spread follows density; circles = replicate medians (N=3)")
+
+    } else if (input$dist_type == "dotplot") {
+      # Dot plot: ONLY replicate-level summaries (what the stats are based on)
+      p <- ggplot(rs, aes(x = Time_fac, y = median_val, color = Condition)) +
+        geom_point(position = position_dodge(0.5),
+                   size = 4, alpha = 0.85) +
+        stat_summary(aes(group = Condition), fun = mean, geom = "crossbar",
+                     position = position_dodge(0.5),
+                     width = 0.3, linewidth = 0.5) +
+        scale_color_manual(values = cols) +
+        labs(x = "Time Post-Infection", y = paste("Median", m, "(per replicate)"),
+             title = paste(m, "— Replicate Summary Dot Plot"),
+             subtitle = "Each point = one biological replicate (N=3); crossbar = group mean")
+
+    } else if (input$dist_type == "boxstrip") {
+      p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
+        geom_boxplot(position = position_dodge(0.8), alpha = 0.6,
+                     outlier.shape = NA, linewidth = 0.4) +
+        scale_fill_manual(values = cols)
+      if (input$show_rep_medians) {
+        p <- p + geom_point(data = rs,
+                            aes(x = Time_fac, y = median_val, group = Condition),
+                            position = position_dodge(0.8),
+                            shape = 18, size = 3.5, color = "black")
+      }
+      p <- p + labs(x = "Time Post-Infection", y = m,
+                    title = paste("Box Plot —", m),
+                    subtitle = "Diamonds = per-replicate medians")
+
+    } else if (input$dist_type == "ecdf") {
+      p <- ggplot(df, aes(x = .data[[m]], color = Condition)) +
+        stat_ecdf(linewidth = 0.8) +
+        scale_color_manual(values = cols) +
+        facet_wrap(~ Time_fac, nrow = 1) +
+        labs(x = m, y = "Cumulative Proportion",
+             title = paste("Empirical CDF —", m),
+             subtitle = "Rightward shift = larger cells")
+    } else {
+      # Fallback if ggridges not installed
+      p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
+        geom_violin(position = position_dodge(0.8), alpha = 0.7) +
+        scale_fill_manual(values = cols) +
+        labs(x = "Time", y = m, title = paste(m, "Distributions"))
+    }
+
+    # --- Significance brackets ---
+    # METHODOLOGY (documented for transparency):
+    #   - Test: Welch's two-sample t-test (two-sided, unequal variance assumed)
+    #   - Tested on: Per-replicate medians (the biological replicate is the
+    #     statistical unit, NOT individual cells — see Lazic 2010)
+    #   - N per group: Number of biological replicates (typically 3)
+    #   - Correction: Holm-Bonferroni step-down across all time-point comparisons
+    #   - Thresholds: * p<0.05, ** p<0.01, *** p<0.001 (APA convention)
+    #   - This is identical to the pairwise tests in the Statistics tab when
+    #     stat_summary = "median_val" (the default and recommended setting).
+    
+    bracket_types <- c("violin", "strip", "sina", "boxstrip", "dotplot")
+    
+    if (isTRUE(input$show_sig) && 
+        input$dist_type %in% bracket_types &&
+        length(unique(df$Condition)) >= 2) {
+      
+      # Use the user-specified reference condition (same as Statistics tab)
+      ref_cond <- levels(df$Condition)[1]  # first level = reference (set in plot_data())
+      trt_conds <- setdiff(levels(df$Condition), ref_cond)
+      times_fac <- levels(df$Time_fac)
+      
+      # Determine dodge width to match the plot type's position_dodge()
+      dodge_w <- switch(input$dist_type,
+        "dotplot" = 0.5,
+        "strip"   = 0.7,
+        0.8  # violin, sina, boxstrip
+      )
+      
+      # Get y-range for bracket positioning
+      if (input$dist_type == "dotplot") {
+        y_vals <- rs$median_val
+      } else {
+        y_vals <- df[[m]]
+      }
+      y_range <- diff(range(y_vals, na.rm = TRUE))
+      if (y_range == 0) y_range <- 1
+      
+      # Collect p-values across ALL comparisons before correction
+      # (Holm correction must see the full family of tests)
+      sig_annot <- data.frame(
+        Time_fac = character(), y_pos = numeric(), p_raw = numeric(),
+        Treatment = character(), n_ctrl = integer(), n_trt = integer(),
+        stringsAsFactors = FALSE
+      )
+      
+      for (tf in times_fac) {
+        tm <- as.numeric(gsub(" min", "", tf))
+        for (trt in trt_conds) {
+          ctrl_vals <- rs$median_val[rs$Condition == ref_cond & rs$Time_min == tm]
+          trt_vals  <- rs$median_val[rs$Condition == trt & rs$Time_min == tm]
+          
+          if (length(ctrl_vals) >= 2 && length(trt_vals) >= 2) {
+            tt <- tryCatch(
+              t.test(trt_vals, ctrl_vals, var.equal = FALSE),
+              error = function(e) NULL
+            )
+            if (!is.null(tt)) {
+              if (input$dist_type == "dotplot") {
+                y_top <- max(c(ctrl_vals, trt_vals), na.rm = TRUE)
+              } else {
+                y_top <- max(df[[m]][df$Time_min == tm], na.rm = TRUE)
+              }
+              sig_annot <- rbind(sig_annot, data.frame(
+                Time_fac = tf, y_pos = y_top, p_raw = tt$p.value,
+                Treatment = trt, n_ctrl = length(ctrl_vals), n_trt = length(trt_vals),
+                stringsAsFactors = FALSE
+              ))
+            }
+          }
+        }
+      }
+      
+      if (nrow(sig_annot) > 0) {
+        # Holm-Bonferroni correction across the full family
+        sig_annot$p_adj <- p.adjust(sig_annot$p_raw, method = "holm")
+        sig_annot$stars <- ifelse(sig_annot$p_adj < 0.001, "***",
+                            ifelse(sig_annot$p_adj < 0.01, "**",
+                                   ifelse(sig_annot$p_adj < 0.05, "*", "ns")))
+        
+        # Format labels
+        sig_annot$label <- switch(input$sig_label_style,
+          "stars"   = sig_annot$stars,
+          "stars_p" = ifelse(sig_annot$p_adj < 0.001,
+                             paste0(sig_annot$stars, "\n(p<0.001)"),
+                             paste0(sig_annot$stars, "\n(p=", formatC(sig_annot$p_adj, format = "f", digits = 3), ")")),
+          "pval"    = ifelse(sig_annot$p_adj < 0.001, "p<0.001",
+                             paste0("p=", formatC(sig_annot$p_adj, format = "f", digits = 3))),
+          sig_annot$stars
+        )
+        
+        # Optionally filter out ns brackets
+        if (!isTRUE(input$show_ns)) {
+          sig_annot <- sig_annot[sig_annot$stars != "ns", , drop = FALSE]
+        }
+        
+        if (nrow(sig_annot) > 0) {
+          # Bracket y-positioning: stagger if multiple comparisons at same timepoint
+          bracket_base <- sig_annot$y_pos + y_range * 0.06
+          bracket_step <- y_range * 0.10
+          
+          # For >2 conditions, stagger brackets at same timepoint
+          for (tf in unique(sig_annot$Time_fac)) {
+            idx <- which(sig_annot$Time_fac == tf)
+            if (length(idx) > 1) {
+              for (j in 2:length(idx)) {
+                bracket_base[idx[j]] <- bracket_base[idx[j]] + (j - 1) * bracket_step
+              }
+            }
+          }
+          
+          # position_dodge places k groups across dodge_w:
+          # group i (0-indexed) is at: (i - (k-1)/2) * dodge_w / k from center
+          n_levels <- length(levels(df$Condition))
+          
+          for (k in seq_len(nrow(sig_annot))) {
+            x_center <- which(times_fac == sig_annot$Time_fac[k])
+            
+            # Compute the actual positions of control and treatment within dodge
+            ref_idx <- 0  # reference is always first factor level
+            trt_idx <- which(levels(df$Condition) == sig_annot$Treatment[k]) - 1  # 0-indexed
+            
+            if (n_levels == 2) {
+              x_left  <- x_center - dodge_w / 4
+              x_right <- x_center + dodge_w / 4
+            } else {
+              # General formula for position_dodge with n groups
+              x_left  <- x_center + (ref_idx - (n_levels - 1) / 2) * dodge_w / n_levels
+              x_right <- x_center + (trt_idx - (n_levels - 1) / 2) * dodge_w / n_levels
+            }
+            
+            y_bar   <- bracket_base[k]
+            y_tick  <- y_bar - y_range * 0.015
+            
+            # Determine color: gray for ns, black for significant
+            bracket_color <- if (sig_annot$stars[k] == "ns") "grey60" else "black"
+            label_color   <- if (sig_annot$stars[k] == "ns") "grey50" else "black"
+            
+            # Bracket: left tick, horizontal bar, right tick
+            p <- p + annotate("segment", x = x_left, xend = x_left,
+                              y = y_tick, yend = y_bar,
+                              linewidth = 0.4, color = bracket_color) +
+                     annotate("segment", x = x_left, xend = x_right,
+                              y = y_bar, yend = y_bar,
+                              linewidth = 0.4, color = bracket_color) +
+                     annotate("segment", x = x_right, xend = x_right,
+                              y = y_tick, yend = y_bar,
+                              linewidth = 0.4, color = bracket_color) +
+                     annotate("text", x = (x_left + x_right) / 2,
+                              y = y_bar + y_range * 0.015,
+                              label = sig_annot$label[k],
+                              size = input$dist_base_size / 2.8,  # ~4.3pt at base 12 → legible
+                              vjust = 0, color = label_color,
+                              fontface = if (sig_annot$stars[k] != "ns") "bold" else "plain")
+          }
+          
+          # Expand y-axis to fit all brackets + labels
+          label_extra <- if (input$sig_label_style == "stars_p") 0.20 else 0.12
+          max_bracket <- max(bracket_base) + y_range * label_extra
+          p <- p + coord_cartesian(ylim = c(NA, max_bracket), clip = "off")
+        }
+        
+        # Add annotation subtitle explaining the statistical test
+        n_reps_range <- paste(range(c(sig_annot$n_ctrl, sig_annot$n_trt)), collapse = "–")
+        n_comparisons <- nrow(sig_annot)
+        p <- p + labs(caption = paste0(
+          "Brackets: Welch's t-test on per-replicate medians (N = ",
+          n_reps_range, " biological replicates/group), ",
+          "Holm-corrected (", n_comparisons, " comparisons). ",
+          "* p<0.05, ** p<0.01, *** p<0.001."
+        ))
+      }
+    }
+
+    p + theme_publication(input$dist_base_size)
+  })
+
+  output$dist_plot <- renderPlot({ dist_plot_obj() })
+  output$dl_dist   <- downloadHandler(
+    filename = function() paste0("distributions_", input$measure, ".", fmt_ext(input$dist_format)),
+    content  = function(file) {
+      save_figure(file, dist_plot_obj(), input$dist_width, input$dist_height,
+                  input$dist_dpi, input$dist_format)
+    }
+  )
+
+  # ---------------------------------------------------------------------------
+  # TRAJECTORY TAB
+  # ---------------------------------------------------------------------------
+  traj_plot_obj <- reactive({
+    req(rep_summ(), cond_summ(), input$traj_summary)
+    rs <- rep_summ()
+    cs <- cond_summ()
+    cols <- cond_colors()
+    yvar <- input$traj_summary
+    ylab <- ifelse(yvar == "median_val",
+                   paste("Median", input$measure, "per Replicate"),
+                   paste("Mean", input$measure, "per Replicate"))
+
+    p <- ggplot()
+
+    # SEM ribbon
+    if (input$traj_error && input$traj_style == "ribbon") {
+      cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
+      cs$sem  <- cs[[ifelse(yvar == "median_val", "sem_median", "sem_mean")]]
+      p <- p + geom_ribbon(data = cs,
+                           aes(x = Time_min, ymin = yvar - sem, ymax = yvar + sem,
+                               fill = Condition),
+                           alpha = 0.2) +
+        scale_fill_manual(values = cols)
+    }
+
+    # Individual replicate lines
+    if (input$traj_connect_reps) {
+      p <- p + geom_line(data = rs,
+                         aes(x = Time_min, y = .data[[yvar]],
+                             group = interaction(Condition, Replicate),
+                             color = Condition),
+                         alpha = 0.4, linewidth = 0.5, linetype = "dashed")
+    }
+
+    # Replicate points
+    p <- p + geom_point(data = rs,
+                        aes(x = Time_min, y = .data[[yvar]],
+                            color = Condition, shape = Replicate),
+                        size = 3, alpha = 0.8)
+
+    # Smooth trend
+    if (input$traj_smooth) {
+      n_times <- length(unique(rs$Time_min))
+      if (n_times >= 4) {
+        p <- p + geom_smooth(data = rs,
+                             aes(x = Time_min, y = .data[[yvar]], color = Condition),
+                             method = "loess", se = input$traj_error && input$traj_style == "pointline",
+                             linewidth = 1.2, alpha = 0.15, span = 1)
+      } else {
+        # Fall back to linear trend with fewer time points
+        p <- p + geom_smooth(data = rs,
+                             aes(x = Time_min, y = .data[[yvar]], color = Condition),
+                             method = "lm", se = input$traj_error && input$traj_style == "pointline",
+                             linewidth = 1.2, alpha = 0.15)
+      }
+    }
+
+    # Error bars (pointline style)
+    if (input$traj_error && input$traj_style == "pointline" && !input$traj_smooth) {
+      cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
+      cs$sem  <- cs[[ifelse(yvar == "median_val", "sem_median", "sem_mean")]]
+      p <- p + geom_errorbar(data = cs,
+                             aes(x = Time_min, ymin = yvar - sem, ymax = yvar + sem,
+                                 color = Condition),
+                             width = 3, linewidth = 0.6)
+    }
+
+    p + scale_color_manual(values = cols) +
+      scale_x_continuous(breaks = sort(unique(rs$Time_min))) +
+      labs(x = "Time Post-Infection (min)", y = ylab,
+           title = paste(input$measure, "Trajectory Over Time"),
+           subtitle = "Each point = one biological replicate; dashed lines connect replicates") +
+      theme_publication(input$traj_base_size)
+  })
+
+  output$traj_plot <- renderPlot({ traj_plot_obj() })
+  output$dl_traj   <- downloadHandler(
+    filename = function() paste0("trajectory_", input$measure, ".", fmt_ext(input$traj_format)),
+    content  = function(file) {
+      save_figure(file, traj_plot_obj(), input$traj_width, input$traj_height,
+                  input$traj_dpi, input$traj_format)
+    }
+  )
+
+  # ---------------------------------------------------------------------------
+  # STATISTICS TAB
+  # ---------------------------------------------------------------------------
+  stat_results <- reactiveVal(NULL)
+
+  observeEvent(input$run_stats, {
+    req(rep_summ(), input$stat_summary)
+    rs  <- rep_summ()
+    yvar <- input$stat_summary
+
+    results <- list()
+
+    # Descriptive summary
+    desc <- rs %>%
+      group_by(Condition, Time_min) %>%
+      summarise(
+        n_reps = n(),
+        across(all_of(yvar), list(mean = mean, sd = sd, median = median)),
+        .groups = "drop"
+      )
+    results$descriptive <- desc
+
+    if (input$stat_method == "anova") {
+      # Two-way ANOVA on replicate-level summaries
+      rs$Time_fac <- factor(rs$Time_min)
+      formula_str <- paste0(yvar, " ~ Condition * Time_fac")
+      model <- aov(as.formula(formula_str), data = rs)
+      anova_tbl <- summary(model)
+      results$anova_summary <- anova_tbl
+      results$model <- model
+      results$method <- "Two-way ANOVA on per-replicate summaries"
+
+      # --- Partial eta-squared ---
+      ss_vals <- anova_tbl[[1]][["Sum Sq"]]
+      ss_resid <- ss_vals[length(ss_vals)]
+      eta2 <- ss_vals[-length(ss_vals)] / (ss_vals[-length(ss_vals)] + ss_resid)
+      results$partial_eta2 <- data.frame(
+        Source = rownames(anova_tbl[[1]])[-length(ss_vals)],
+        partial_eta2 = round(eta2, 3)
+      )
+
+      # --- Assumption diagnostics ---
+      resids <- residuals(model)
+      # Shapiro-Wilk normality test on residuals
+      sw <- tryCatch(shapiro.test(resids), error = function(e) NULL)
+      results$shapiro <- sw
+      # Levene's test (using median, via manual computation to avoid car dependency)
+      rs$group <- interaction(rs$Condition, rs$Time_fac, drop = TRUE)
+      group_medians <- tapply(rs[[yvar]], rs$group, median)
+      rs$abs_dev <- abs(rs[[yvar]] - group_medians[rs$group])
+      levene_model <- tryCatch({
+        summary(aov(abs_dev ~ group, data = rs))
+      }, error = function(e) NULL)
+      results$levene <- levene_model
+
+      # Pairwise: Welch's t-test at each time point with 95% CIs
+      cond_levels <- levels(rs$Condition)
+      ref_cond <- cond_levels[1]
+      trt_conds <- cond_levels[-1]
+
+      pw_list <- lapply(sort(unique(rs$Time_min)), function(tm) {
+        rs_t <- rs[rs$Time_min == tm, ]
+        lapply(trt_conds, function(trt) {
+          ctrl_vals <- rs_t[[yvar]][rs_t$Condition == ref_cond]
+          trt_vals  <- rs_t[[yvar]][rs_t$Condition == trt]
+          # Welch's t-test: var.equal=FALSE is R's default
+          tt <- tryCatch(t.test(trt_vals, ctrl_vals, var.equal = FALSE, conf.level = 0.95),
+                         error = function(e) NULL)
+          data.frame(
+            Time_min  = tm,
+            Control   = ref_cond,
+            Treatment = trt,
+            ctrl_mean = mean(ctrl_vals, na.rm = TRUE),
+            trt_mean  = mean(trt_vals, na.rm = TRUE),
+            diff      = mean(trt_vals, na.rm = TRUE) - mean(ctrl_vals, na.rm = TRUE),
+            CI_lo     = if (!is.null(tt)) tt$conf.int[1] else NA_real_,
+            CI_hi     = if (!is.null(tt)) tt$conf.int[2] else NA_real_,
+            t_stat    = if (!is.null(tt)) tt$statistic else NA_real_,
+            df        = if (!is.null(tt)) tt$parameter else NA_real_,
+            p_raw     = if (!is.null(tt)) tt$p.value else NA_real_,
+            stringsAsFactors = FALSE
+          )
+        }) %>% bind_rows()
+      }) %>% bind_rows()
+      pw_list$p_adj <- p.adjust(pw_list$p_raw, method = "holm")
+      pw_list$sig   <- ifelse(pw_list$p_adj < 0.001, "***",
+                         ifelse(pw_list$p_adj < 0.01, "**",
+                                ifelse(pw_list$p_adj < 0.05, "*", "ns")))
+      results$pairwise <- pw_list
+
+    } else if (input$stat_method == "lmm" && has_lme4) {
+      # Linear mixed model on ALL cell-level data
+      # This is the sophisticated approach: cell-level data with replicate as random effect
+      req(plot_data(), input$measure)
+      df <- plot_data()
+      df$Time_fac <- factor(df$Time_min)
+
+      # CRITICAL: Create unique replicate IDs across conditions.
+      # Replicate "1" in Uninfected is a DIFFERENT dish than Replicate "1" in +N4.
+      # Without this, lmer treats them as the same random-effect group.
+      df$Rep_unique <- interaction(df$Condition, df$Replicate, drop = TRUE)
+
+      formula_lmm <- as.formula(paste0(input$measure, " ~ Condition * Time_fac + (1|Rep_unique)"))
+
+      model <- tryCatch({
+        # lmerTest::lmer gives anova() with p-values via Satterthwaite approximation
+        if (requireNamespace("lmerTest", quietly = TRUE)) {
+          lmerTest::lmer(formula_lmm, data = df)
+        } else {
+          lme4::lmer(formula_lmm, data = df)
+        }
+      }, error = function(e) {
+        showNotification(paste("LMM failed:", e$message), type = "error", duration = 10)
+        return(NULL)
+      })
+
+      if (!is.null(model)) {
+        results$model <- model
+        results$anova_summary <- tryCatch(anova(model), error = function(e) NULL)
+        results$method <- "Linear Mixed Model (cell-level with replicate as random effect)"
+
+        if (has_emmeans) {
+          emm <- tryCatch(emmeans::emmeans(model, ~ Condition | Time_fac), error = function(e) NULL)
+          if (!is.null(emm)) {
+            pw  <- pairs(emm, adjust = "holm")
+            results$emmeans  <- emm
+            results$pairwise_emm <- pw
+          }
+        }
+      }
+    }
+
+    stat_results(results)
+    showNotification("Analysis complete.", type = "message")
+  })
+
+  output$stat_output <- renderPrint({
+    req(stat_results())
+    r <- stat_results()
+    cat("=== METHOD ===\n")
+    cat(r$method, "\n\n")
+    cat("=== ANOVA TABLE ===\n")
+    if (!is.null(r$anova_summary)) {
+      print(r$anova_summary)
+      if (!has_lmerTest && grepl("Mixed", r$method)) {
+        cat("\nNote: Install the 'lmerTest' package for p-values in the ANOVA table.\n")
+        cat("  install.packages('lmerTest')\n")
+      }
+    } else {
+      cat("ANOVA table not available.\n")
+    }
+
+    # Partial eta-squared
+    if (!is.null(r$partial_eta2)) {
+      cat("\n=== EFFECT SIZES (partial eta-squared) ===\n")
+      cat("Benchmarks: small = 0.01, medium = 0.06, large = 0.14 (Cohen, 1988)\n")
+      print(r$partial_eta2, row.names = FALSE)
+    }
+
+    cat("\nKey: Look at the Condition:Time interaction term.\n")
+    cat("A significant interaction (p < 0.05) means the infection effect\n")
+    cat("changes over time.\n\n")
+
+    # Assumption diagnostics
+    if (!is.null(r$shapiro) || !is.null(r$levene)) {
+      cat("=== ANOVA ASSUMPTION DIAGNOSTICS ===\n")
+    }
+    if (!is.null(r$shapiro)) {
+      cat(sprintf("  Shapiro-Wilk (normality of residuals): W = %.4f, p = %.4f\n",
+                  r$shapiro$statistic, r$shapiro$p.value))
+      if (r$shapiro$p.value >= 0.05) {
+        cat("    --> Residuals consistent with normality.\n")
+      } else {
+        cat("    --> Residuals deviate from normality.\n")
+        cat("       ANOVA is robust with balanced designs.\n")
+      }
+    }
+    if (!is.null(r$levene)) {
+      lev_f <- r$levene[[1]]["group", "F value"]
+      lev_p <- r$levene[[1]]["group", "Pr(>F)"]
+      cat(sprintf("  Levene's test (homogeneity of variance): F = %.4f, p = %.4f\n",
+                  lev_f, lev_p))
+      if (lev_p >= 0.05) {
+        cat("    --> Variances homogeneous across groups.\n")
+      } else {
+        cat("    --> Variances differ across groups.\n")
+        cat("       ANOVA is fairly robust with balanced designs.\n")
+      }
+    }
+    cat("\n")
+
+    if (!is.null(r$pairwise)) {
+      cat("=== PAIRWISE COMPARISONS (Welch's t-test, 95% CI, Holm-corrected) ===\n")
+    }
+    if (!is.null(r$pairwise_emm)) {
+      cat("=== PAIRWISE COMPARISONS (emmeans) ===\n")
+      print(r$pairwise_emm)
+    }
+  })
+
+  output$pairwise_table <- renderDT({
+    req(stat_results())
+    r <- stat_results()
+    if (!is.null(r$pairwise)) {
+      pw <- r$pairwise
+      pw[] <- lapply(pw, function(x) if (is.numeric(x)) round(x, 4) else x)
+      datatable(pw, options = list(pageLength = 10, dom = 't'))
+    } else if (!is.null(r$pairwise_emm)) {
+      datatable(as.data.frame(summary(r$pairwise_emm)),
+                options = list(pageLength = 10, dom = 't'))
+    }
+  })
+
+  output$dl_stats <- downloadHandler(
+    filename = function() paste0("stats_results_", input$measure, "_", Sys.Date(), ".txt"),
+    content  = function(file) {
+      r <- stat_results()
+      sink(file)
+      cat("================================================================\n")
+      cat("CellMorphR Statistical Results\n")
+      cat("================================================================\n")
+      cat("Date:", as.character(Sys.time()), "\n")
+      cat("Measure:", input$measure, "\n")
+      cat("Method:", r$method, "\n\n")
+
+      if (!is.null(r$descriptive)) {
+        cat("=== DESCRIPTIVE STATISTICS (per-replicate summaries) ===\n")
+        print(as.data.frame(r$descriptive), row.names = FALSE)
+        cat("\n")
+      }
+
+      cat("=== ANOVA TABLE ===\n")
+      if (!is.null(r$anova_summary)) {
+        print(r$anova_summary)
+      } else {
+        cat("ANOVA table not available.\n")
+      }
+
+      if (!is.null(r$partial_eta2)) {
+        cat("\n=== EFFECT SIZES (partial eta-squared) ===\n")
+        cat("Benchmarks: small=0.01, medium=0.06, large=0.14 (Cohen, 1988)\n")
+        print(r$partial_eta2, row.names = FALSE)
+      }
+
+      cat("\n=== ASSUMPTION DIAGNOSTICS ===\n")
+      if (!is.null(r$shapiro)) {
+        cat(sprintf("Shapiro-Wilk (normality): W = %.4f, p = %.4f\n",
+                    r$shapiro$statistic, r$shapiro$p.value))
+      }
+      if (!is.null(r$levene)) {
+        lev_f <- r$levene[[1]]["group", "F value"]
+        lev_p <- r$levene[[1]]["group", "Pr(>F)"]
+        cat(sprintf("Levene's test (homogeneity): F = %.4f, p = %.4f\n", lev_f, lev_p))
+      }
+
+      if (!is.null(r$pairwise)) {
+        cat("\n=== PAIRWISE COMPARISONS (Welch's t-test, 95% CI, Holm-corrected) ===\n")
+        print(as.data.frame(r$pairwise), row.names = FALSE)
+      }
+
+      if (!is.null(r$pairwise_emm)) {
+        cat("\n=== PAIRWISE COMPARISONS (emmeans, Holm-corrected) ===\n")
+        print(r$pairwise_emm)
+      }
+
+      cat("\n================================================================\n")
+      cat("STATISTICAL METHODS\n")
+      cat("================================================================\n")
+      cat("ANOVA: Two-way factorial ANOVA (Type I SS) on per-replicate\n")
+      cat("summaries. Effect sizes: partial eta-squared (Cohen, 1988).\n")
+      cat("With balanced design, Type I = Type II = Type III SS.\n\n")
+      cat("Assumption diagnostics:\n")
+      cat("  - Shapiro-Wilk test for normality of residuals\n")
+      cat("  - Levene's test (median-centered) for homogeneity of variance\n")
+      cat("  ANOVA robust to moderate violations (Maxwell & Delaney, 2004)\n\n")
+      cat("Pairwise: Welch's t-test (Ruxton, 2006) with 95% CIs.\n")
+      cat("Correction: Holm-Bonferroni step-down (Holm, 1979).\n\n")
+      cat("Statistical unit: Biological replicate, not individual cell.\n")
+      cat("This avoids pseudoreplication (Lazic, 2010).\n\n")
+      cat("Both R Shiny and Python CellMorphR produce identical results.\n")
+      cat("================================================================\n")
+      sink()
+    }
+  )
+
+  # ---------------------------------------------------------------------------
+  # EFFECT SIZES TAB
+  # ---------------------------------------------------------------------------
+  es_data <- reactive({
+    req(rep_summ(), input$es_summary, input$ref_condition)
+    rs   <- rep_summ()
+    yvar <- input$es_summary
+    ref  <- input$ref_condition
+    conds <- setdiff(levels(rs$Condition), ref)
+    if (length(conds) == 0) conds <- setdiff(unique(as.character(rs$Condition)), ref)
+
+    times <- sort(unique(rs$Time_min))
+    es_list <- lapply(times, function(tm) {
+      ctrl_vals <- rs[[yvar]][rs$Condition == ref & rs$Time_min == tm]
+      lapply(conds, function(cd) {
+        trt_vals <- rs[[yvar]][rs$Condition == cd & rs$Time_min == tm]
+        ctrl_m <- mean(ctrl_vals)
+        trt_m  <- mean(trt_vals)
+        pooled_sd <- sqrt((var(ctrl_vals) + var(trt_vals)) / 2)
+        data.frame(
+          Time_min  = tm,
+          Condition = cd,
+          ctrl_mean = ctrl_m,
+          trt_mean  = trt_m,
+          abs_diff  = trt_m - ctrl_m,
+          pct_change = if (abs(ctrl_m) > 1e-10) (trt_m - ctrl_m) / ctrl_m * 100 else NA_real_,
+          cohens_d  = if (pooled_sd > 0) (trt_m - ctrl_m) / pooled_sd else NA_real_
+        )
+      }) %>% bind_rows()
+    }) %>% bind_rows()
+    es_list
+  })
+
+  es_plot_obj <- reactive({
+    req(es_data(), input$es_type)
+    esd  <- es_data()
+    cols <- cond_colors()
+    yvar <- input$es_type
+    ylab <- switch(yvar,
+                   abs_diff   = paste("Δ", input$measure, "(Treatment - Control)"),
+                   pct_change = paste("% Change in", input$measure),
+                   cohens_d   = "Cohen's d")
+
+    p <- ggplot(esd, aes(x = Time_min, y = .data[[yvar]], color = Condition)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+      geom_line(linewidth = 1.2) +
+      geom_point(size = 4) +
+      scale_color_manual(values = cols[-1]) +
+      scale_x_continuous(breaks = sort(unique(esd$Time_min))) +
+      labs(x = "Time Post-Infection (min)", y = ylab,
+           title = paste("Effect of Infection on", input$measure, "Over Time"),
+           subtitle = "Computed from per-replicate summary means") +
+      theme_publication(input$es_base_size)
+
+    if (yvar == "cohens_d") {
+      p <- p + geom_hline(yintercept = c(-0.8, 0.8), linetype = "dotted", color = "grey70") +
+        annotate("text", x = min(esd$Time_min), y = 0.85, label = "Large effect (|d|=0.8)",
+                 hjust = 0, size = 3, color = "grey50")
+    }
+    p
+  })
+
+  output$es_plot  <- renderPlot({ es_plot_obj() })
+  output$es_table <- renderDT({
+    req(es_data())
+    esd <- es_data()
+    esd[] <- lapply(esd, function(x) if (is.numeric(x)) round(x, 3) else x)
+    datatable(esd, options = list(dom = 't'))
+  })
+  output$dl_es <- downloadHandler(
+    filename = function() paste0("effect_sizes_", input$measure, ".", fmt_ext(input$es_format)),
+    content  = function(file) {
+      save_figure(file, es_plot_obj(), input$es_width, input$es_height,
+                  input$es_dpi, input$es_format)
+    }
+  )
+
+  # ---------------------------------------------------------------------------
+  # PUBLICATION COMPOSITE FIGURE
+  # ---------------------------------------------------------------------------
+  pub_plot_obj <- reactive({
+    req(input$pub_panels, has_patchwork)
+    panels <- list()
+
+    base <- input$pub_base_size
+    df   <- plot_data()
+    rs   <- rep_summ()
+    cols <- cond_colors()
+    m    <- input$measure
+
+    if ("dist" %in% input$pub_panels) {
+      df$Time_fac <- factor(paste0(df$Time_min, " min"),
+                            levels = paste0(sort(unique(df$Time_min)), " min"))
+      rs$Time_fac <- factor(paste0(rs$Time_min, " min"),
+                            levels = paste0(sort(unique(rs$Time_min)), " min"))
+      p_dist <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
+        geom_violin(position = position_dodge(0.8), alpha = 0.7,
+                    scale = "width", linewidth = 0.3, color = "grey30") +
+        geom_point(data = rs,
+                   aes(x = Time_fac, y = median_val, fill = Condition, group = Condition),
+                   position = position_dodge(0.8),
+                   shape = 21, size = 2.5, color = "black", stroke = 0.7) +
+        scale_fill_manual(values = cols) +
+        labs(x = NULL, y = m, title = NULL) +
+        theme_publication(base) +
+        theme(legend.position = "none")
+      panels[["dist"]] <- p_dist
+    }
+
+    if ("traj" %in% input$pub_panels) {
+      yvar <- "median_val"
+      p_traj <- ggplot(rs, aes(x = Time_min, y = .data[[yvar]], color = Condition)) +
+        geom_line(aes(group = interaction(Condition, Replicate)),
+                  alpha = 0.35, linewidth = 0.4, linetype = "dashed") +
+        geom_point(aes(shape = Replicate), size = 2.5, alpha = 0.8) +
+        scale_color_manual(values = cols) +
+        scale_x_continuous(breaks = sort(unique(rs$Time_min))) +
+        labs(x = "Time (min)", y = paste("Median", m), title = NULL) +
+        theme_publication(base)
+      # Add loess only if enough time points (loess needs >= 4)
+      if (length(unique(rs$Time_min)) >= 4) {
+        p_traj <- p_traj +
+          geom_smooth(method = "loess", se = TRUE, alpha = 0.12,
+                      linewidth = 1.1, span = 1)
+      } else {
+        p_traj <- p_traj +
+          stat_summary(fun = mean, geom = "line", linewidth = 1.1)
+      }
+      panels[["traj"]] <- p_traj
+    }
+
+    if ("effect" %in% input$pub_panels) {
+      esd <- es_data()
+      p_es <- ggplot(esd, aes(x = Time_min, y = pct_change, color = Condition)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+        geom_line(linewidth = 1.1) + geom_point(size = 3.5) +
+        scale_color_manual(values = cols[-1]) +
+        scale_x_continuous(breaks = sort(unique(esd$Time_min))) +
+        labs(x = "Time (min)", y = paste("% Δ", m), title = NULL) +
+        theme_publication(base) +
+        theme(legend.position = "none")
+      panels[["effect"]] <- p_es
+    }
+
+    if (length(panels) == 0) return(NULL)
+
+    # Add panel labels
+    labeled <- lapply(seq_along(panels), function(i) {
+      panels[[i]] + ggtitle(LETTERS[i])
+    })
+
+    patchwork::wrap_plots(labeled, nrow = 1) +
+      patchwork::plot_annotation(
+        title    = paste(m, "— Bacteriophage Infection Time Course"),
+        subtitle = "Per-replicate analysis (N=3 biological replicates per group)",
+        theme    = theme_publication(base)
+      )
+  })
+
+  output$pub_plot <- renderPlot({
+    if (has_patchwork) pub_plot_obj()
+  })
+
+  output$dl_pub <- downloadHandler(
+    filename = function() paste0("figure_", input$measure, ".", fmt_ext(input$pub_format)),
+    content  = function(file) {
+      save_figure(file, pub_plot_obj(), input$pub_width, input$pub_height,
+                  input$pub_dpi, input$pub_format)
+    }
+  )
+}
+
+# =============================================================================
+# RUN
+# =============================================================================
+shinyApp(ui, server)
