@@ -84,9 +84,66 @@ def set_pub_style(font_size=11):
         "savefig.pad_inches": 0.1,
     })
 
-# Default color palette: blue for control, red for treatment
-COLORS = {"control": "#4A90D9", "treatment": "#D94A4A"}
+# -----------------------------------------------------------------------------
+# Colourblind-safe palettes
+# -----------------------------------------------------------------------------
+# Okabe-Ito (2008) is the recommended qualitative palette for scientific
+# figures: distinguishable under the common forms of colour-vision deficiency
+# (deutan/protan/tritan) and robust in grayscale. https://jfly.uni-koeln.de/color/
+# Ordered so the control (blue) and first treatment (vermillion) are maximally
+# separable.
+OKABE_ITO = [
+    "#0072B2",  # blue        (control / reference)
+    "#D55E00",  # vermillion  (treatment 1)
+    "#009E73",  # bluish green
+    "#CC79A7",  # reddish purple
+    "#E69F00",  # orange
+    "#56B4E9",  # sky blue
+    "#F0E442",  # yellow
+    "#999999",  # grey
+]
+
+# Viridis anchor colours (perceptually uniform, colourblind-safe). Used when the
+# user selects --palette viridis; sampled evenly for n conditions at call time.
+VIRIDIS_ANCHORS = ["#440154", "#3B528B", "#21908C", "#5DC863", "#FDE725"]
+
+# Backwards-compatible default (control/treatment) — now colourblind-safe.
+COLORS = {"control": OKABE_ITO[0], "treatment": OKABE_ITO[1]}
 REPLICATE_MARKERS = ["o", "s", "^", "D", "v", "P"]  # per-replicate shapes
+
+
+def palette_colors(n, palette="okabe"):
+    """Return a list of n colourblind-safe colours for the chosen palette."""
+    n = max(int(n), 1)
+    if palette == "viridis":
+        try:
+            cmap = plt.get_cmap("viridis")
+            return [cmap(x) for x in np.linspace(0.05, 0.95, n)]
+        except Exception:
+            base = VIRIDIS_ANCHORS
+            return [base[i % len(base)] for i in range(n)]
+    # Okabe-Ito (recycled if more than 8 conditions)
+    return [OKABE_ITO[i % len(OKABE_ITO)] for i in range(n)]
+
+
+def axis_label(measure, unit=None, prefix=""):
+    """Build an axis label, appending a unit in parentheses when supplied.
+
+    e.g. axis_label("Area", "µm²") -> "Area (µm²)".
+    """
+    label = f"{prefix}{measure}"
+    if unit and str(unit).strip():
+        label = f"{label} ({str(unit).strip()})"
+    return label
+
+
+def _n_rep_text(rep_summary):
+    """Actual number of biological replicates per group as 'k' or 'lo–hi'."""
+    counts = rep_summary.groupby(["Condition", "Time_min"]).size()
+    if len(counts) == 0:
+        return "?"
+    n_min, n_max = int(counts.min()), int(counts.max())
+    return str(n_min) if n_min == n_max else f"{n_min}–{n_max}"
 
 
 # =============================================================================
@@ -313,7 +370,8 @@ def _add_sig_brackets(ax, pairwise_df, times, offsets, style,
 # =============================================================================
 def plot_distributions(df, rep_summary, measure, conditions, colors,
                        figsize=(8, 5), font_size=11, style="violin",
-                       sig_results=None, sig_style="stars", show_ns=True):
+                       sig_results=None, sig_style="stars", show_ns=True,
+                       unit=None):
     """
     Distribution plots of single-cell measurements at each condition x time,
     with per-replicate medians overlaid.
@@ -337,12 +395,13 @@ def plot_distributions(df, rep_summary, measure, conditions, colors,
     width = 0.35
     offsets = np.linspace(-width / 2, width / 2, n_cond)
 
+    n_rep = _n_rep_text(rep_summary)
     style_labels = {
-        "violin": "Violins = cell distributions; markers = per-replicate medians (N=3)",
-        "strip": "Each point = one cell; large markers = per-replicate medians (N=3)",
-        "sina": "Point spread follows density; large markers = per-replicate medians (N=3)",
-        "dotplot": "Each point = one biological replicate median (N=3); bar = group mean",
-        "box": "Box = IQR; markers = per-replicate medians (N=3)",
+        "violin": f"Violins = cell distributions; markers = per-replicate medians (N = {n_rep})",
+        "strip": f"Each point = one cell; large markers = per-replicate medians (N = {n_rep})",
+        "sina": f"Point spread follows density; large markers = per-replicate medians (N = {n_rep})",
+        "dotplot": f"Each point = one biological replicate median (N = {n_rep}); bar = group mean",
+        "box": f"Box = IQR; markers = per-replicate medians (N = {n_rep})",
     }
     style_titles = {
         "violin": f"Single-Cell {measure} Distributions",
@@ -373,7 +432,7 @@ def plot_distributions(df, rep_summary, measure, conditions, colors,
             for j, gm in enumerate(group_means):
                 ax.plot([positions[j] - bar_hw, positions[j] + bar_hw],
                         [gm, gm], color=colors[i], linewidth=1.5, zorder=4)
-        ax.set_ylabel(f"Median {measure} (per replicate)")
+        ax.set_ylabel(axis_label(measure, unit, prefix="Median ") + " (per replicate)")
 
     else:
         for i, cond in enumerate(conditions):
@@ -442,7 +501,7 @@ def plot_distributions(df, rep_summary, measure, conditions, colors,
                     marker=REPLICATE_MARKERS[i % len(REPLICATE_MARKERS)],
                     label=cond if j == 0 else None,
                 )
-        ax.set_ylabel(measure)
+        ax.set_ylabel(axis_label(measure, unit))
 
     ax.set_xticks(range(len(times)))
     ax.set_xticklabels([f"{t} min" for t in times])
@@ -468,7 +527,7 @@ def plot_distributions(df, rep_summary, measure, conditions, colors,
 # =============================================================================
 def plot_trajectories(rep_summary, cond_summary, measure, conditions, colors,
                       stat="median_val", connect_reps=True,
-                      figsize=(6, 4.5), font_size=11):
+                      figsize=(6, 4.5), font_size=11, unit=None):
     """
     Per-replicate summary trajectories over time, with condition-level
     trend lines and SEM ribbons.
@@ -527,11 +586,12 @@ def plot_trajectories(rep_summary, cond_summary, measure, conditions, colors,
 
     ax.set_xticks(times)
     ax.set_xlabel("Time Post-Infection (min)")
-    ax.set_ylabel(f"{stat_label} {measure} per Replicate")
+    ax.set_ylabel(axis_label(measure, unit, prefix=f"{stat_label} ") + " per Replicate")
     ax.set_title(f"{measure} Trajectory Over Time")
     ax.text(
         0.0, 1.02,
-        "Points = biological replicates; ribbon = SEM; dashed = individual trajectories",
+        f"Points = biological replicates (N = {_n_rep_text(rep_summary)}); "
+        "ribbon = SEM of replicate summaries; dashed = individual trajectories",
         transform=ax.transAxes, fontsize=font_size - 2, color="#666666",
     )
     ax.legend(loc="upper left")
@@ -578,13 +638,13 @@ def compute_effect_sizes(rep_summary, ref_condition, stat="median_val"):
 
 
 def plot_effect_sizes(es_df, measure, metric="pct_change", colors=None,
-                      figsize=(6, 4), font_size=11):
+                      figsize=(6, 4), font_size=11, unit=None):
     """Plot effect size trajectory over time."""
     set_pub_style(font_size)
     fig, ax = plt.subplots(figsize=figsize)
 
     labels = {
-        "abs_diff": f"Δ {measure} (Treatment − Control)",
+        "abs_diff": f"Δ {axis_label(measure, unit)} (Treatment − Control)",
         "pct_change": f"% Change in {measure}",
         "cohens_d": "Cohen's d",
     }
@@ -617,7 +677,7 @@ def plot_effect_sizes(es_df, measure, metric="pct_change", colors=None,
 # =============================================================================
 # PLOT 4: ECDF
 # =============================================================================
-def plot_ecdf(df, measure, conditions, colors, figsize=(10, 3.5), font_size=11):
+def plot_ecdf(df, measure, conditions, colors, figsize=(10, 3.5), font_size=11, unit=None):
     """
     Empirical cumulative distribution function at each time point.
 
@@ -639,7 +699,7 @@ def plot_ecdf(df, measure, conditions, colors, figsize=(10, 3.5), font_size=11):
             ax.step(sorted_vals, ecdf_y, color=colors[i], linewidth=1.5, label=cond)
 
         ax.set_title(f"{t} min", fontsize=font_size)
-        ax.set_xlabel(measure)
+        ax.set_xlabel(axis_label(measure, unit))
         if ax == axes[0]:
             ax.set_ylabel("Cumulative Proportion")
             ax.legend(fontsize=font_size - 2)
@@ -655,7 +715,7 @@ def plot_ecdf(df, measure, conditions, colors, figsize=(10, 3.5), font_size=11):
 def plot_composite(df, rep_summary, cond_summary, es_df, measure,
                    conditions, colors, figsize=(14, 5), font_size=10,
                    dist_style="violin", sig_results=None, sig_style="stars",
-                   show_ns=True, stat="median_val"):
+                   show_ns=True, stat="median_val", unit=None):
     """Multi-panel publication figure: A) Distributions, B) Trajectories, C) Effect sizes."""
     set_pub_style(font_size)
     fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=figsize,
@@ -742,9 +802,9 @@ def plot_composite(df, rep_summary, cond_summary, es_df, measure,
             for j, gm in enumerate(group_means):
                 ax_a.plot([positions[j] - bar_hw, positions[j] + bar_hw],
                           [gm, gm], color=colors[i], linewidth=1.5, zorder=4)
-        ax_a.set_ylabel(f"Median {measure}")
+        ax_a.set_ylabel(axis_label(measure, unit, prefix="Median "))
     else:
-        ax_a.set_ylabel(measure)
+        ax_a.set_ylabel(axis_label(measure, unit))
 
     ax_a.set_xticks(range(len(times)))
     ax_a.set_xticklabels([f"{t}" for t in times])
@@ -786,7 +846,7 @@ def plot_composite(df, rep_summary, cond_summary, es_df, measure,
 
     ax_b.set_xticks(times)
     ax_b.set_xlabel("Time (min)")
-    ax_b.set_ylabel(f"{stat_label} {measure}")
+    ax_b.set_ylabel(axis_label(measure, unit, prefix=f"{stat_label} "))
     ax_b.legend(fontsize=font_size - 2, loc="upper left")
     ax_b.set_title("B", loc="left", fontweight="bold", fontsize=font_size + 2)
 
@@ -1182,6 +1242,7 @@ Examples:
   python cellmorphr.py data.xlsx --measure Area --all-plots --save-stats
   python cellmorphr.py --demo --measure Area --all-plots
   python cellmorphr.py data.csv --measure Perimeter --ref "Uninfected" --format png
+  python cellmorphr.py --demo --measure Area --unit "µm²" --palette viridis --composite
         """,
     )
     parser.add_argument("file", nargs="?", help="Input file (Excel or CSV)")
@@ -1191,9 +1252,19 @@ Examples:
     parser.add_argument("--stat", choices=["median", "mean"], default="median",
                         help="Summary statistic for replicates (default: median)")
     parser.add_argument("--format", "-f", choices=["pdf", "png", "svg"], default="pdf",
-                        help="Output format (default: pdf)")
-    parser.add_argument("--dpi", type=int, default=300, help="Output DPI (default: 300)")
+                        help="Output format (default: pdf). PDF/SVG are vector; "
+                             "PNG is raster at --dpi.")
+    parser.add_argument("--dpi", type=int, default=300, help="Output DPI for raster formats (default: 300)")
     parser.add_argument("--font-size", type=int, default=11, help="Base font size (default: 11)")
+    parser.add_argument("--palette", choices=["okabe", "viridis"], default="okabe",
+                        help="Colourblind-safe colour palette (default: okabe = Okabe-Ito). "
+                             "Both options are safe for colour-vision deficiency.")
+    parser.add_argument("--unit", default=None,
+                        help="Measurement unit appended to axis titles, "
+                             'e.g. --unit "µm²" -> "Area (µm²)".')
+    parser.add_argument("--figsize", default=None,
+                        help='Distribution/trajectory figure size in inches as "W,H" '
+                             "(e.g. --figsize 8,5). Defaults to per-plot sizes.")
     parser.add_argument("--outdir", "-o", default=".", help="Output directory")
 
     # Plot flags
@@ -1266,7 +1337,17 @@ Examples:
     # Order conditions
     all_conds = list(df["Condition"].unique())
     conditions = [ref] + [c for c in all_conds if c != ref]
-    colors = [COLORS["control"]] + [COLORS["treatment"]] * (len(conditions) - 1)
+    # Colourblind-safe palette, one distinct colour per condition
+    colors = palette_colors(len(conditions), palette=args.palette)
+
+    # Optional user-supplied figure size for distribution/trajectory plots
+    figsize_dist, figsize_traj = (8, 5), (6, 4.5)
+    if args.figsize:
+        try:
+            w, h = (float(x) for x in args.figsize.split(","))
+            figsize_dist = figsize_traj = (w, h)
+        except Exception:
+            print(f"Warning: could not parse --figsize '{args.figsize}'; using defaults.")
 
     # Compute summaries
     rep_summ = compute_replicate_summaries(df, measure)
@@ -1290,9 +1371,10 @@ Examples:
     # Generate plots
     if args.all_plots or args.violin:
         fig = plot_distributions(df, rep_summ, measure, conditions, colors,
+                                figsize=figsize_dist,
                                 font_size=args.font_size, style=args.plot_style,
                                 sig_results=sig_data, sig_style=args.sig_style,
-                                show_ns=show_ns)
+                                show_ns=show_ns, unit=args.unit)
         path = outdir / f"distributions_{measure}.{ext}"
         fig.savefig(path, dpi=args.dpi, bbox_inches="tight")
         plt.close(fig)
@@ -1300,14 +1382,16 @@ Examples:
 
     if args.all_plots or args.trajectory:
         fig = plot_trajectories(rep_summ, cond_summ, measure, conditions, colors,
-                                stat=stat_col, font_size=args.font_size)
+                                stat=stat_col, figsize=figsize_traj,
+                                font_size=args.font_size, unit=args.unit)
         path = outdir / f"trajectory_{measure}.{ext}"
         fig.savefig(path, dpi=args.dpi)
         plt.close(fig)
         print(f"Saved: {path}")
 
     if args.all_plots or args.ecdf:
-        fig = plot_ecdf(df, measure, conditions, colors, font_size=args.font_size)
+        fig = plot_ecdf(df, measure, conditions, colors,
+                        font_size=args.font_size, unit=args.unit)
         path = outdir / f"ecdf_{measure}.{ext}"
         fig.savefig(path, dpi=args.dpi)
         plt.close(fig)
@@ -1315,7 +1399,7 @@ Examples:
 
     if args.all_plots or args.effect:
         fig = plot_effect_sizes(es_df, measure, "pct_change", colors,
-                                font_size=args.font_size)
+                                font_size=args.font_size, unit=args.unit)
         path = outdir / f"effect_size_{measure}.{ext}"
         fig.savefig(path, dpi=args.dpi)
         plt.close(fig)
@@ -1326,7 +1410,7 @@ Examples:
                              conditions, colors, font_size=args.font_size,
                              dist_style=args.plot_style,
                              sig_results=sig_data, sig_style=args.sig_style,
-                             show_ns=show_ns, stat=stat_col)
+                             show_ns=show_ns, stat=stat_col, unit=args.unit)
         path = outdir / f"figure_{measure}.{ext}"
         fig.savefig(path, dpi=args.dpi, bbox_inches="tight")
         plt.close(fig)
