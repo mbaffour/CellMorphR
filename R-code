@@ -47,6 +47,36 @@ app_theme <- bs_theme(
 )
 
 # =============================================================================
+# COLOURBLIND-SAFE PALETTES
+# =============================================================================
+# Okabe-Ito (2008) is the recommended qualitative palette for scientific
+# figures: it is distinguishable under the common forms of colour-vision
+# deficiency (deuteranopia, protanopia, tritanopia) and reproduces well in
+# grayscale. See https://jfly.uni-koeln.de/color/ .
+# The first two entries are chosen so the control (reference) condition and the
+# first treatment are maximally separable (blue vs. vermillion).
+okabe_ito <- c(
+  "#0072B2",  # blue        (control / reference)
+  "#D55E00",  # vermillion  (treatment 1)
+  "#009E73",  # bluish green
+  "#CC79A7",  # reddish purple
+  "#E69F00",  # orange
+  "#56B4E9",  # sky blue
+  "#F0E442",  # yellow
+  "#999999"   # grey
+)
+
+# Return a colourblind-safe vector of n colours for the chosen palette.
+palette_colors <- function(n, palette = "okabe") {
+  if (identical(palette, "viridis")) {
+    scales::viridis_pal(option = "D", end = 0.9)(max(n, 1))
+  } else {
+    # Okabe-Ito, recycled if more than 8 conditions are supplied
+    rep(okabe_ito, length.out = max(n, 1))[seq_len(max(n, 1))]
+  }
+}
+
+# =============================================================================
 # PUBLICATION GGPLOT THEME
 # =============================================================================
 theme_publication <- function(base_size = 12) {
@@ -117,6 +147,17 @@ compute_replicate_summaries <- function(df, measure) {
     )
 }
 
+# Build an axis label for a measurement, appending a unit in parentheses when
+# the user supplies one (e.g. "Area" + "µm²"  ->  "Area (µm²)"). A leading
+# qualifier such as "Median " can be prepended via `prefix`.
+axis_label <- function(measure, unit = NULL, prefix = "") {
+  lab <- paste0(prefix, measure)
+  if (!is.null(unit) && nzchar(trimws(unit))) {
+    lab <- paste0(lab, " (", trimws(unit), ")")
+  }
+  lab
+}
+
 compute_condition_summaries <- function(rep_summary) {
   rep_summary %>%
     group_by(Condition, Time_min) %>%
@@ -163,7 +204,15 @@ ui <- page_navbar(
                "Plus one or more numeric measurement columns (Area, Perimeter, etc.)"),
         tags$hr(),
         uiOutput("measure_selector"),
+        textInput("measure_unit", "Measurement unit (optional)",
+                  value = "", placeholder = "e.g. µm², µm, a.u."),
+        tags$p(class = "small text-muted",
+               "Appended to axis titles, e.g. \"Area (µm²)\". Leave blank for none."),
         uiOutput("condition_order_ui"),
+        selectInput("palette", "Colour palette",
+                    choices = c("Okabe-Ito (colourblind-safe)" = "okabe",
+                                "Viridis (colourblind-safe)"    = "viridis"),
+                    selected = "okabe"),
         tags$hr(),
         actionButton("load_demo", "Load Demo Data", class = "btn-outline-secondary btn-sm w-100"),
         tags$p(class = "small text-muted mt-2",
@@ -669,16 +718,16 @@ server <- function(input, output, session) {
     df
   })
 
-  # Colour palette reactive
+  # Colour palette reactive — colourblind-safe by default (Okabe-Ito), with a
+  # viridis option. Works for any number of conditions.
   cond_colors <- reactive({
     req(plot_data())
     n <- length(levels(plot_data()$Condition))
-    if (n == 2) {
-      c("#4A90D9", "#D94A4A")  # Blue for control, Red for treatment
-    } else {
-      scales::hue_pal()(n)
-    }
+    palette_colors(n, palette = if (is.null(input$palette)) "okabe" else input$palette)
   })
+
+  # Current measurement unit (character; "" when unset)
+  cur_unit <- reactive({ if (is.null(input$measure_unit)) "" else input$measure_unit })
 
   # Replicate summaries
   rep_summ <- reactive({
@@ -723,6 +772,13 @@ server <- function(input, output, session) {
     m   <- input$measure
     rs  <- rep_summ()
     cols <- cond_colors()
+    ylab <- axis_label(m, cur_unit())
+    # Actual number of biological replicates per group (min–max across groups),
+    # so annotations reflect the real design instead of a hard-coded "N=3".
+    n_rep_tbl   <- table(rs$Condition, rs$Time_min)
+    n_rep_range <- range(as.vector(n_rep_tbl[n_rep_tbl > 0]))
+    n_rep_txt   <- if (n_rep_range[1] == n_rep_range[2]) as.character(n_rep_range[1])
+                   else paste(n_rep_range, collapse = "–")
 
     # Factor time for discrete x-axis
     df$Time_fac <- factor(paste0(df$Time_min, " min"),
@@ -751,9 +807,9 @@ server <- function(input, output, session) {
                      position = position_dodge(0.8),
                      shape = 21, size = 3.5, color = "black", stroke = 0.0, alpha = 0.8)
       }
-      p <- p + labs(x = "Time Post-Infection", y = m,
+      p <- p + labs(x = "Time Post-Infection", y = ylab,
                     title = paste("Single-Cell", m, "Distributions"),
-                    subtitle = "Violins = cell distributions; points = per-replicate medians (N=3)")
+                    subtitle = paste0("Violins = cell distributions; points = per-replicate medians (N = ", n_rep_txt, ")"))
 
     } else if (input$dist_type == "ridge" && has_ridges) {
       df$Group <- interaction(df$Condition, df$Time_fac, sep = " | ")
@@ -769,7 +825,7 @@ server <- function(input, output, session) {
       p <- ggplot(df, aes(x = .data[[m]], y = Group, fill = Condition)) +
         ggridges::geom_density_ridges(alpha = 0.7, scale = 1.3, linewidth = 0.3) +
         scale_fill_manual(values = cols) +
-        labs(x = m, y = NULL, title = paste("Ridge Plot —", m))
+        labs(x = ylab, y = NULL, title = paste("Ridge Plot —", m))
 
     } else if (input$dist_type == "strip") {
       # Strip / jitter plot: all individual cells as points
@@ -786,9 +842,9 @@ server <- function(input, output, session) {
                      position = position_dodge(0.7),
                      shape = 21, size = 3.5, fill = "white", color = "black", stroke = 0.8)
       }
-      p <- p + labs(x = "Time Post-Infection", y = m,
+      p <- p + labs(x = "Time Post-Infection", y = ylab,
                     title = paste("Single-Cell", m, "— Jitter Plot"),
-                    subtitle = "Each point = one cell; crossbar = group median; circles = replicate medians (N=3)")
+                    subtitle = paste0("Each point = one cell; crossbar = group median; circles = replicate medians (N = ", n_rep_txt, ")"))
 
     } else if (input$dist_type == "sina") {
       # Sina plot: jitter width follows the density (like a violin made of points)
@@ -811,9 +867,9 @@ server <- function(input, output, session) {
                             position = position_dodge(0.8),
                             shape = 21, size = 3.5, fill = "white", color = "black", stroke = 0.8)
       }
-      p <- p + labs(x = "Time Post-Infection", y = m,
+      p <- p + labs(x = "Time Post-Infection", y = ylab,
                     title = paste("Single-Cell", m, "— Sina Plot"),
-                    subtitle = "Point spread follows density; circles = replicate medians (N=3)")
+                    subtitle = paste0("Point spread follows density; circles = replicate medians (N = ", n_rep_txt, ")"))
 
     } else if (input$dist_type == "dotplot") {
       # Dot plot: ONLY replicate-level summaries (what the stats are based on)
@@ -824,9 +880,9 @@ server <- function(input, output, session) {
                      position = position_dodge(0.5),
                      width = 0.3, linewidth = 0.5) +
         scale_color_manual(values = cols) +
-        labs(x = "Time Post-Infection", y = paste("Median", m, "(per replicate)"),
+        labs(x = "Time Post-Infection", y = axis_label(m, cur_unit(), prefix = "Median "),
              title = paste(m, "— Replicate Summary Dot Plot"),
-             subtitle = "Each point = one biological replicate (N=3); crossbar = group mean")
+             subtitle = paste0("Each point = one biological replicate (N = ", n_rep_txt, "); crossbar = group mean"))
 
     } else if (input$dist_type == "boxstrip") {
       p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
@@ -839,16 +895,16 @@ server <- function(input, output, session) {
                             position = position_dodge(0.8),
                             shape = 18, size = 3.5, color = "black")
       }
-      p <- p + labs(x = "Time Post-Infection", y = m,
+      p <- p + labs(x = "Time Post-Infection", y = ylab,
                     title = paste("Box Plot —", m),
-                    subtitle = "Diamonds = per-replicate medians")
+                    subtitle = paste0("Boxes = IQR; diamonds = per-replicate medians (N = ", n_rep_txt, ")"))
 
     } else if (input$dist_type == "ecdf") {
       p <- ggplot(df, aes(x = .data[[m]], color = Condition)) +
         stat_ecdf(linewidth = 0.8) +
         scale_color_manual(values = cols) +
         facet_wrap(~ Time_fac, nrow = 1) +
-        labs(x = m, y = "Cumulative Proportion",
+        labs(x = ylab, y = "Cumulative Proportion",
              title = paste("Empirical CDF —", m),
              subtitle = "Rightward shift = larger cells")
     } else {
@@ -856,7 +912,7 @@ server <- function(input, output, session) {
       p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
         geom_violin(position = position_dodge(0.8), alpha = 0.7) +
         scale_fill_manual(values = cols) +
-        labs(x = "Time", y = m, title = paste(m, "Distributions"))
+        labs(x = "Time", y = ylab, title = paste(m, "Distributions"))
     }
 
     # --- Significance brackets ---
@@ -1054,9 +1110,9 @@ server <- function(input, output, session) {
     cs <- cond_summ()
     cols <- cond_colors()
     yvar <- input$traj_summary
-    ylab <- ifelse(yvar == "median_val",
-                   paste("Median", input$measure, "per Replicate"),
-                   paste("Mean", input$measure, "per Replicate"))
+    ylab <- axis_label(input$measure, cur_unit(),
+                       prefix = if (yvar == "median_val") "Median " else "Mean ")
+    ylab <- paste0(ylab, " per Replicate")
 
     p <- ggplot()
 
@@ -1117,7 +1173,8 @@ server <- function(input, output, session) {
       scale_x_continuous(breaks = sort(unique(rs$Time_min))) +
       labs(x = "Time Post-Infection (min)", y = ylab,
            title = paste(input$measure, "Trajectory Over Time"),
-           subtitle = "Each point = one biological replicate; dashed lines connect replicates") +
+           subtitle = paste0("Each point = one biological replicate; dashed lines connect replicates",
+                             if (input$traj_error) "; band/bars = SEM of replicate summaries" else "")) +
       theme_publication(input$traj_base_size)
   })
 
@@ -1454,7 +1511,8 @@ server <- function(input, output, session) {
     cols <- cond_colors()
     yvar <- input$es_type
     ylab <- switch(yvar,
-                   abs_diff   = paste("Δ", input$measure, "(Treatment - Control)"),
+                   abs_diff   = paste0("Δ ", axis_label(input$measure, cur_unit()),
+                                       " (Treatment − Control)"),
                    pct_change = paste("% Change in", input$measure),
                    cohens_d   = "Cohen's d")
 
@@ -1518,7 +1576,7 @@ server <- function(input, output, session) {
                    position = position_dodge(0.8),
                    shape = 21, size = 2.5, color = "black", stroke = 0.7) +
         scale_fill_manual(values = cols) +
-        labs(x = NULL, y = m, title = NULL) +
+        labs(x = NULL, y = axis_label(m, cur_unit()), title = NULL) +
         theme_publication(base) +
         theme(legend.position = "none")
       panels[["dist"]] <- p_dist
@@ -1532,7 +1590,7 @@ server <- function(input, output, session) {
         geom_point(aes(shape = Replicate), size = 2.5, alpha = 0.8) +
         scale_color_manual(values = cols) +
         scale_x_continuous(breaks = sort(unique(rs$Time_min))) +
-        labs(x = "Time (min)", y = paste("Median", m), title = NULL) +
+        labs(x = "Time (min)", y = axis_label(m, cur_unit(), prefix = "Median "), title = NULL) +
         theme_publication(base)
       # Add loess only if enough time points (loess needs >= 4)
       if (length(unique(rs$Time_min)) >= 4) {
@@ -1566,10 +1624,16 @@ server <- function(input, output, session) {
       panels[[i]] + ggtitle(LETTERS[i])
     })
 
+    n_rep_tbl   <- table(rs$Condition, rs$Time_min)
+    n_rep_range <- range(as.vector(n_rep_tbl[n_rep_tbl > 0]))
+    n_rep_txt   <- if (n_rep_range[1] == n_rep_range[2]) as.character(n_rep_range[1])
+                   else paste(n_rep_range, collapse = "–")
+
     patchwork::wrap_plots(labeled, nrow = 1) +
       patchwork::plot_annotation(
         title    = paste(m, "— Bacteriophage Infection Time Course"),
-        subtitle = "Per-replicate analysis (N=3 biological replicates per group)",
+        subtitle = paste0("Per-replicate analysis (N = ", n_rep_txt,
+                          " biological replicates per group)"),
         theme    = theme_publication(base)
       )
   })
