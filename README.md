@@ -1,5 +1,17 @@
 # CellMorphR <img src="https://img.shields.io/badge/R-Shiny-blue?logo=r" alt="R Shiny"/> <img src="https://img.shields.io/badge/Python-3.8+-green?logo=python" alt="Python 3.8+"/> <img src="https://img.shields.io/badge/License-MIT-yellow" alt="MIT License"/>
 
+## Quick start — double-click to run (no command line)
+
+If you have [R](https://cran.r-project.org/) installed, you don't need the terminal:
+
+| OS | Double-click |
+|----|--------------|
+| **Windows** | `Run CellMorphR.bat` |
+| **macOS** | `Run CellMorphR.command` |
+| **Linux** | `./run.sh` |
+
+The **first run** installs the required R packages (a few minutes); after that the app opens in your web browser instantly. You can also run it directly with `Rscript run_app.R`.
+
 **A statistical analysis suite for time-resolved single-cell morphometry data from bacteriophage infection experiments.**
 
 CellMorphR provides publication-ready visualization and statistically rigorous analysis of cell morphological changes over time, with built-in safeguards against pseudoreplication — the most common statistical error in microscopy-based studies.
