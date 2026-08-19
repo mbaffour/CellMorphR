@@ -1,8 +1,8 @@
 #!/usr/bin/env Rscript
 # Auto-installs any missing packages on first run, then opens the Shiny app in your browser.
 # Launched by the "Run CellMorphR" (.bat / .command) scripts, or run:  Rscript run_app.R
-APP  <- "R-code"
-PKGS <- c("shiny","bslib","DT","dplyr","tidyr","readxl","writexl","scales","svglite","emmeans","lme4","lmerTest","ggplot2","ggbeeswarm","ggforce","ggridges","patchwork","colourpicker")
+APP  <- "CellMorphR_v3.R"
+PKGS <- c("shiny","bslib","DT","dplyr","tidyr","readxl","writexl","scales","svglite","emmeans","lme4","lmerTest","ggplot2","ggbeeswarm","ggforce","ggridges","patchwork","colourpicker","cluster","hexbin","officer","rvg")
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
 # Use a writable personal library — R in "Program Files" usually isn't user-writable,
