@@ -1,16 +1,27 @@
 # CellMorphR <img src="https://img.shields.io/badge/R-Shiny-blue?logo=r" alt="R Shiny"/> <img src="https://img.shields.io/badge/Python-3.8+-green?logo=python" alt="Python 3.8+"/> <img src="https://img.shields.io/badge/License-MIT-yellow" alt="MIT License"/>
 
-## Quick start â€” double-click to run (no command line)
+## Quick start - download and run (no command line)
 
-If you have [R](https://cran.r-project.org/) installed, you don't need the terminal:
+**[Download the latest release](https://github.com/mbaffour/CellMorphR/releases/latest)** (or clone this repo), unzip it, then double-click:
 
 | OS | Double-click |
 |----|--------------|
-| **Windows** | `Run CellMorphR.bat` |
+| **Windows** | `run_cellmorphr.bat` |
 | **macOS** | `Run CellMorphR.command` |
 | **Linux** | `./run.sh` |
 
-The **first run** installs the required R packages (a few minutes); after that the app opens in your web browser instantly. You can also run it directly with `Rscript run_app.R`.
+The **first run** installs the required R packages (a few minutes); after that the app opens in your web browser instantly. Keep the console window open while you work - closing it stops the app.
+
+Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macOS/Linux) does the same thing.
+
+### Versions
+
+| Version | App file | Status |
+|---------|----------|--------|
+| **3.0.0** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. |
+| 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
+
+Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases). See [METHODS.md](METHODS.md) for a citable description of how figures are plotted and statistics computed.
 
 **A statistical analysis suite for time-resolved single-cell morphometry data from bacteriophage infection experiments.**
 
@@ -175,9 +186,9 @@ install.packages(c(
 **Step 2: Launch the app**
 
 ```r
-# From RStudio: open app.R and click "Run App"
+# From RStudio: open CellMorphR_v3.R and click "Run App"
 # Or from the R console:
-shiny::runApp("app.R")
+shiny::runApp(shiny::shinyAppFile("CellMorphR_v3.R"), launch.browser = TRUE)
 ```
 
 The app opens in your default web browser at `http://127.0.0.1:xxxx`.
@@ -784,7 +795,7 @@ python cellmorphr.py --demo --measure Area --all-plots --save-stats
 
 | Issue | Solution |
 |-------|----------|
-| `Error: could not find function "%\|\|%"` | Fixed in current version. If using an older version, add `library(rlang)` to the top of `app.R`, or replace the `%\|\|%` operator with base R (see commit history). |
+| `Error: could not find function "%\|\|%"` | Fixed in current version. If using an older version, add `library(rlang)` to the top of `CellMorphR_v3.R`, or replace the `%\|\|%` operator with base R (see commit history). |
 | LMM crashes / app disconnects when running Linear Mixed Model | Fixed in current version. Two issues were resolved: (1) Replicate IDs like 1, 2, 3 repeated across conditions caused `lmer` to treat cross-condition replicates as the same random-effect group â€” the app now creates unique IDs automatically. (2) Missing `lmerTest` package meant ANOVA tables lacked p-values, causing downstream errors. Install with `install.packages("lmerTest")`. |
 | LMM ANOVA table shows no p-values | Install `lmerTest`: `install.packages("lmerTest")`. Without it, `lme4::lmer` returns F-statistics but no p-values by design. `lmerTest` adds Satterthwaite-approximated p-values. |
 | `Error in read_excel: path does not exist` | Ensure the file extension is `.xlsx` or `.xls`. If your file is `.csv`, the app detects this automatically. |
