@@ -94,6 +94,10 @@ theme_publication <- function(base_size = 12, legend_pos = "top",
                                       size = lxs, color = "black"),
       legend.background = element_blank(),
       legend.key       = element_blank(),
+      legend.key.spacing.y = unit(3, "pt"),
+      # Stack multiple guides (e.g. Condition + Replicate, or colour + size)
+      # instead of letting them compete for one row and run off the figure.
+      legend.box       = "vertical",
       legend.position  = legend_pos,
       panel.background = element_blank(),
       panel.grid       = element_blank(),
@@ -257,6 +261,29 @@ build_group_label <- function(df, selected_cols, separator = " | ") {
   do.call(paste, c(pieces, sep = separator))
 }
 
+# Wrap a single label string to a maximum line width so long titles, subtitles,
+# and captions fold into multiple lines instead of running over the figure.
+wrap_plot_text <- function(x, width = 100) {
+  if (is.null(x) || !is.character(x) || length(x) != 1 || is.na(x) || !nzchar(x)) return(x)
+  paste(strwrap(x, width = width), collapse = "\n")
+}
+
+# Fold long legend entries (e.g. long condition names) onto multiple lines so
+# wide legends stop colliding with each other or the panel. Only touches
+# discrete scales whose labels are still automatic, so explicit labels
+# (wrapped x axes, named quartile bins, ...) are left alone.
+wrap_legend_labels <- function(p, width = 24) {
+  try({
+    for (i in seq_along(p$scales$scales)) {
+      sc <- p$scales$scales[[i]]
+      if (inherits(sc, "ScaleDiscrete") && inherits(sc$labels, "waiver")) {
+        p$scales$scales[[i]]$labels <- function(x) wrap_axis_labels(x, width)
+      }
+    }
+  }, silent = TRUE)
+  p
+}
+
 wrap_axis_labels <- function(labels, width = 18) {
   width <- suppressWarnings(as.integer(width))
   if (is.na(width) || width <= 0) width <- 18
@@ -278,20 +305,23 @@ format_p_value <- function(p) {
 # plus a base-label column (and generic part columns), so gradient designs can
 # be analyzed as vector x dose instead of N unrelated groups.
 split_condition_parts <- function(conds, delim = "_") {
-  conds <- as.character(conds)
-  toks <- strsplit(conds, delim, fixed = TRUE)
-  # Last token containing a digit is treated as the numeric dose/level token
-  num_idx <- vapply(toks, function(tt) { hits <- grep("[0-9]", tt); if (length(hits)) hits[length(hits)] else NA_integer_ }, integer(1))
-  num_tok <- mapply(function(tt, i) if (is.na(i)) NA_character_ else tt[i], toks, num_idx)
-  num_val <- suppressWarnings(as.numeric(gsub("[^0-9.eE-]", "", num_tok)))
-  unit <- gsub("[0-9.eE-]", "", num_tok)
-  unit_tab <- table(unit[!is.na(unit) & nzchar(unit)])
+  conds <- trimws(as.character(conds))
+  # Dose = a trailing number with an optional unit suffix, matched at the END of
+  # the label. Anchoring matters: naively stripping non-digits would read "75"
+  # out of a gene name like "gp75" instead of the real dose.
+  dose_re <- "([0-9]+\\.?[0-9]*)[[:space:]]*([A-Za-z]*)[[:space:]]*$"
+  m <- regmatches(conds, regexec(dose_re, conds))
+  num_val <- vapply(m, function(g) if (length(g) >= 2) suppressWarnings(as.numeric(g[2])) else NA_real_, numeric(1))
+  unit <- vapply(m, function(g) if (length(g) >= 3) g[3] else "", character(1))
+  unit_tab <- table(unit[nzchar(unit)])
   unit_name <- if (length(unit_tab) > 0) names(sort(unit_tab, decreasing = TRUE))[1] else ""
-  base <- mapply(function(tt, i) {
-    keep <- if (is.na(i)) tt else tt[-i]
-    if (length(keep) == 0) "" else paste(keep, collapse = delim)
-  }, toks, num_idx)
-  max_parts <- max(lengths(toks))
+  # Base label = the condition with that trailing dose token removed
+  base <- trimws(sub(dose_re, "", conds))
+  base <- trimws(gsub(paste0("[", gsub("([][^\\-])", "\\\\\\1", delim), "[:space:]]+$"), "", base))
+  base[!nzchar(base)] <- conds[!nzchar(base)]
+  # Generic per-delimiter parts (useful when labels encode >2 factors)
+  toks <- strsplit(conds, delim, fixed = TRUE)
+  max_parts <- max(c(1L, lengths(toks)))
   parts <- lapply(seq_len(max_parts), function(i)
     vapply(toks, function(tt) if (length(tt) >= i) tt[i] else NA_character_, character(1)))
   names(parts) <- paste0("Cond_Part", seq_len(max_parts))
@@ -315,11 +345,12 @@ min_wilcox_p <- function(n1, n2) {
 compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
                               test = "welch", correction = "holm",
                               label_style = "stars", show_ns = TRUE,
-                              y_lookup = NULL) {
+                              y_lookup = NULL, max_brackets = 12, max_per_time = 4) {
   sig_annot <- data.frame(Time_min = numeric(), y_pos = numeric(), p_raw = numeric(),
                           Cond1 = character(), Cond2 = character(), stringsAsFactors = FALSE)
   underpowered <- FALSE
   wilcox_impossible <- FALSE
+  truncated_note <- NULL
   for (tm in times) {
     for (pair in pairs_list) {
       vals1 <- rs[[sig_yvar]][rs$Condition == pair[1] & rs$Time_min == tm]
@@ -357,6 +388,24 @@ compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
                          paste0("p=", formatC(sig_annot$p_adj, format = "f", digits = 3))),
       sig_annot$stars)
     if (!isTRUE(show_ns)) sig_annot <- sig_annot[sig_annot$stars != "ns", , drop = FALSE]
+    # Too many brackets bury the figure: keep only the most significant ones and
+    # say so in the caption (full results live in the Statistics tab). Cap per
+    # timepoint as well as overall, so one timepoint cannot become a ladder of
+    # brackets that squashes the data into the bottom of the panel.
+    n_total <- nrow(sig_annot)
+    if (is.finite(max_per_time)) {
+      keep_idx <- unlist(lapply(split(seq_len(nrow(sig_annot)), sig_annot$Time_min),
+        function(ix) ix[order(sig_annot$p_adj[ix])][seq_len(min(length(ix), max_per_time))]))
+      sig_annot <- sig_annot[sort(keep_idx), , drop = FALSE]
+    }
+    if (is.finite(max_brackets) && nrow(sig_annot) > max_brackets) {
+      keep <- order(sig_annot$p_adj)[seq_len(max_brackets)]
+      sig_annot <- sig_annot[sort(keep), , drop = FALSE]
+    }
+    if (nrow(sig_annot) < n_total) {
+      truncated_note <- paste0("Showing the ", nrow(sig_annot), " most significant of ",
+                               n_total, " comparisons; full results in the Statistics tab.")
+    }
   }
   test_name <- if (test == "wilcox") "Wilcoxon rank-sum" else "Welch's t-test"
   corr_name <- switch(if (is.null(correction)) "holm" else correction,
@@ -370,6 +419,7 @@ compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
     "Wilcoxon cannot reach p<0.05 with these replicate counts -- use Welch's t-test, the mixed model, or a trend test.")
   else if (underpowered) warn <- c(warn,
     "Fewer than 3 replicates in at least one group: tests are underpowered; consider the mixed model or a trend test.")
+  if (!is.null(truncated_note)) warn <- c(warn, truncated_note)
   if (length(warn) > 0) caption <- paste0(caption, " Note: ", paste(warn, collapse = " "))
   list(annot = sig_annot, caption = caption, warnings = warn)
 }
@@ -767,7 +817,9 @@ compute_raw_heatmap_data <- function(df, features, stat_fn = "mean") {
       mutate(Feature = m)
   })
   res <- bind_rows(rs_list)
-  res$Group <- paste0(res$Condition, "\n", res$Time_min, " min")
+  # Single-line label: these are drawn on an angled axis, where an embedded
+  # line break makes the two lines cross each other.
+  res$Group <- paste0(res$Condition, " | ", res$Time_min, " min")
   res
 }
 
@@ -841,7 +893,10 @@ plot_radar <- function(radar_df, cols, base_sz = 12, show_points = TRUE,
   p <- p + geom_text(data = axis_df, aes(x = x, y = y, label = Feature),
     size = base_sz / 3.5, fontface = "bold", color = "grey20") +
     scale_fill_manual(values = cols) + scale_color_manual(values = cols) +
-    coord_fixed() + theme_void(base_size = base_sz) +
+    # Extra room around the wheel so the outermost feature labels (drawn at
+    # radius 1.18) are not clipped at the left/right edges of the panel.
+    coord_fixed(xlim = c(-1.6, 1.6), ylim = c(-1.3, 1.3)) +
+    theme_void(base_size = base_sz) +
     theme(legend.position = "bottom",
           plot.title = element_text(face = "bold", hjust = 0.5))
   p
@@ -984,7 +1039,11 @@ apply_custom_labs <- function(p, input, prefix) {
     if (!is.null(p$labels$colour)) p <- p + labs(color = lg)
   }
   cap <- get_txt("_custom_caption");  if (!is.null(cap)) p <- p + labs(caption = cap)
-  p
+  # Fold long text so it never runs past the figure edge (auto or custom alike)
+  p$labels$title    <- wrap_plot_text(p$labels$title,    width = 70)
+  p$labels$subtitle <- wrap_plot_text(p$labels$subtitle, width = 105)
+  p$labels$caption  <- wrap_plot_text(p$labels$caption,  width = 110)
+  wrap_legend_labels(p)
 }
 
 
@@ -1449,7 +1508,7 @@ ui <- page_navbar(
           radioButtons("sig_label_style", "Label style",
             choices = c("Stars (*, **, ***)" = "stars", "Stars + p-value" = "stars_p",
                         "p-value only" = "pval"), selected = "stars"),
-          checkboxInput("show_ns", "Show ns brackets", TRUE),
+          checkboxInput("show_ns", "Show ns brackets", FALSE),
           radioButtons("sig_stat_unit", "Test using replicate-level:",
             choices = c("Medians" = "median_val", "Means" = "mean_val"),
             selected = "median_val", inline = TRUE),
@@ -2821,8 +2880,12 @@ server <- function(input, output, session) {
     req(plot_data())
     conds <- levels(plot_data()$Condition); n <- length(conds)
     dcols <- if (n == 2) c("#4A90D9", "#D94A4A") else scales::hue_pal()(n)
-    if (has_colourpicker) sapply(seq_along(conds), function(i) { v <- input[[paste0("color_", i)]]; if (!is.null(v) && nchar(v) > 0) v else dcols[i] })
+    cols <- if (has_colourpicker)
+      sapply(seq_along(conds), function(i) { v <- input[[paste0("color_", i)]]; if (!is.null(v) && nchar(v) > 0) v else dcols[i] })
     else dcols
+    # Names matter: several tabs subset this by condition name (e.g. dropping the
+    # reference condition), which silently returns nothing on an unnamed vector.
+    setNames(as.character(cols), conds)
   })
 
   # Replicate summaries
@@ -3300,11 +3363,12 @@ server <- function(input, output, session) {
         group_by(Condition, Time_fac) %>% mutate(pct = n / sum(n) * 100) %>% ungroup()
       p <- ggplot(freq, aes(x = "", y = pct, fill = size_bin)) +
         geom_col(width = 1, color = "white", linewidth = 0.4) +
-        coord_polar(theta = "y") + facet_grid(Condition ~ Time_fac) +
+        coord_polar(theta = "y") +
+        facet_grid(Condition ~ Time_fac,
+                   labeller = labeller(Condition = function(x) wrap_axis_labels(x, 16))) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
         labs(x = NULL, y = NULL, title = paste("Cell Size Composition --", mlbl),
-             subtitle = "Proportional pie chart; faceted by condition and time") +
-        theme(axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank())
+             subtitle = "Proportional pie chart; faceted by condition and time")
 
     } else if (input$dist_type == "donut") {
       breaks_q <- quantile(df[[m]], probs = seq(0, 1, 0.25), na.rm = TRUE)
@@ -3317,11 +3381,11 @@ server <- function(input, output, session) {
       p <- ggplot(freq, aes(x = 2, y = pct, fill = size_bin)) +
         geom_col(width = 1, color = "white", linewidth = 0.4) +
         coord_polar(theta = "y") + xlim(0.5, 2.5) +
-        facet_grid(Condition ~ Time_fac) +
+        facet_grid(Condition ~ Time_fac,
+                   labeller = labeller(Condition = function(x) wrap_axis_labels(x, 16))) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
         labs(x = NULL, y = NULL, title = paste("Cell Composition --", mlbl, "(Donut)"),
-             subtitle = "Proportional donut chart; faceted by condition and time") +
-        theme(axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank())
+             subtitle = "Proportional donut chart; faceted by condition and time")
 
     } else {
       p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
@@ -3378,7 +3442,9 @@ server <- function(input, output, session) {
       {
         if (nrow(sig_annot) > 0) {
           n_levels <- length(cond_levels)
-          bracket_base <- sig_annot$y_pos + y_range * 0.06; bracket_step <- y_range * 0.10
+          bracket_base <- sig_annot$y_pos + y_range * 0.06
+          # Taller steps when labels are two lines (stars + p-value)
+          bracket_step <- y_range * (if ((input$sig_label_style %||% "stars") == "stars_p") 0.17 else 0.10)
           # Stack brackets at each timepoint so they don't overlap
           for (tf in unique(sig_annot$Time_fac)) {
             idx <- which(sig_annot$Time_fac == tf)
@@ -3430,10 +3496,12 @@ server <- function(input, output, session) {
       upper <- suppressWarnings(max(c(y_max, sig_ymax), na.rm = TRUE))
       if (!is.finite(upper)) upper <- NA
       if (!is.na(y_min) || !is.na(upper)) {
+        # clip="off" is only needed to let bracket labels sit above the panel;
+        # otherwise keep clipping on so data cannot spill past the axis limits.
         p <- p + coord_cartesian(ylim = c(
           if (!is.na(y_min)) y_min else NA,
           if (!is.na(upper)) upper else NA
-        ), clip = "off")
+        ), clip = if (!is.na(sig_ymax)) "off" else "on")
       }
     }
 
@@ -3442,16 +3510,58 @@ server <- function(input, output, session) {
     p <- p + get_theme(input, "dist")
 
     # Readable x-axis labels for crowded experiments (discrete-x plots only --
-    # ridge/ECDF/histogram put the measurement on a continuous x axis)
+    # ridge/ECDF/histogram put the measurement on a continuous x axis).
+    # Wrapping onto multiple lines only helps horizontal labels; angled
+    # multi-line labels collide with their neighbors, so wrap only at 0 deg.
     x_angle <- suppressWarnings(as.numeric(input$dist_x_angle %||% 45))
     x_hjust <- ifelse(x_angle == 0, 0.5, 1)
     if (input$dist_type %in% c("violin", "strip", "sina", "boxstrip", "dotplot", "stacked_bar")) {
-      p <- p + scale_x_discrete(labels = function(x) wrap_axis_labels(x, input$dist_label_wrap %||% 18))
+      # Horizontal labels sit side by side, so the more x groups there are the
+      # narrower each label may be before neighbours collide. Angled labels do
+      # not have this constraint (and must stay on one line).
+      n_x <- {
+        xc <- if (sample_x_mode) "Sample_Label" else if (input$dist_type == "violin") "x_var_col" else "Time_fac"
+        src <- if (input$dist_type == "dotplot") rs else df
+        if (xc %in% names(src)) length(unique(as.character(src[[xc]]))) else 1
+      }
+      wrap_w <- if (x_angle == 0)
+        max(6, min(input$dist_label_wrap %||% 18, floor(130 / max(1, n_x)))) else 500
+      p <- p + scale_x_discrete(labels = function(x) {
+        lab <- wrap_axis_labels(x, wrap_w)
+        if (!is.null(n_lookup)) {
+          extra <- unname(n_lookup[as.character(x)])
+          lab <- ifelse(is.na(extra), lab, paste0(lab, "\n", extra))
+        }
+        lab
+      })
     }
-    p <- p + theme(axis.text.x = element_text(angle = x_angle, hjust = x_hjust, vjust = 1),
-            plot.margin = margin(12, 12, input$dist_bottom_margin %||% 18, 12))
+    left_margin <- if (sample_x_mode && x_angle > 0) 40 else 12
+    if (input$dist_type %in% c("pie", "donut")) {
+      # Polar charts have no meaningful cartesian axes. get_theme() is a complete
+      # theme, so this blanking has to come after it, not in the geom branch.
+      p <- p + theme(axis.text = element_blank(), axis.ticks = element_blank(),
+                     axis.line = element_blank(), panel.grid = element_blank(),
+                     strip.text.y = element_text(angle = 0, hjust = 0, size = rel(0.7),
+                                                 lineheight = 0.9),
+                     strip.text.x = element_text(size = rel(0.68)),
+                     panel.spacing = unit(2, "pt"),
+                     plot.margin = margin(12, 12, 12, 12))
+    } else if (input$dist_type %in% c("ridge", "ecdf", "histogram")) {
+      # x is the continuous measurement here, so leave its numbers horizontal.
+      # Ridge y labels are one per group, so shrink them when groups are many.
+      n_ygroups <- if (input$dist_type == "ridge") length(unique(df$Condition)) * length(unique(df$Time_min)) else 0
+      y_rel <- if (n_ygroups > 24) 0.6 else if (n_ygroups > 14) 0.72 else 1
+      p <- p + theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 1),
+                     axis.text.y = element_text(size = rel(y_rel)),
+                     plot.margin = margin(12, 12, 12, 12))
+    } else {
+      p <- p + theme(axis.text.x = element_text(angle = x_angle, hjust = x_hjust, vjust = 1),
+              plot.margin = margin(12, 12, input$dist_bottom_margin %||% 18, left_margin))
+    }
 
-    # Optional per-group n annotation (cells / replicates)
+    # Optional per-group n annotation. Appended to the x-axis tick labels rather
+    # than drawn in the panel, so it can never sit on top of the data.
+    n_lookup <- NULL
     if (isTRUE(input$dist_show_n) && input$dist_type %in% c("violin", "strip", "sina", "boxstrip", "dotplot")) {
       x_col <- if (sample_x_mode) "Sample_Label" else if (input$dist_type == "violin") "x_var_col" else "Time_fac"
       n_src <- if (input$dist_type == "dotplot") rs else df
@@ -3459,13 +3569,10 @@ server <- function(input, output, session) {
         n_df <- n_src %>% group_by(.data[[x_col]]) %>%
           summarise(n_cells = n(), n_reps = n_distinct(Replicate), .groups = "drop")
         names(n_df)[1] <- "x_grp"
-        n_df$lab <- if (input$dist_type == "dotplot") paste0("N=", n_df$n_reps)
-                    else paste0("n=", n_df$n_cells, "\nN=", n_df$n_reps)
-        y_all <- if (input$dist_type == "dotplot") rs[[stat_col]] else df[[m]]
-        y_lo <- min(y_all, na.rm = TRUE); y_rng <- diff(range(y_all, na.rm = TRUE)); if (y_rng == 0) y_rng <- 1
-        p <- p + geom_text(data = n_df, aes(x = x_grp, y = y_lo - y_rng * 0.06, label = lab),
-                           inherit.aes = FALSE, size = (input$dist_base_size %||% 12) / 4,
-                           color = "grey30", vjust = 1, lineheight = 0.9)
+        n_lookup <- setNames(
+          if (input$dist_type == "dotplot") paste0("N=", n_df$n_reps)
+          else paste0("n=", n_df$n_cells, ", N=", n_df$n_reps),
+          as.character(n_df$x_grp))
       }
     }
 
@@ -3667,15 +3774,23 @@ server <- function(input, output, session) {
 
   emm_plot_obj <- reactive({
     req(stat_results()); r <- stat_results(); req(r$emm_summary)
-    emm_df <- r$emm_summary; cols <- cond_colors()
-    ggplot(emm_df, aes(x = Time_fac, y = emmean, color = Condition, group = Condition)) +
-      geom_point(position = position_dodge(0.3), size = 3) +
-      geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), position = position_dodge(0.3), width = 0.2, linewidth = 0.6) +
+    emm_df <- as.data.frame(r$emm_summary); cols <- cond_colors()
+    # emmeans names its CI columns lower.CL/upper.CL or asymp.LCL/asymp.UCL
+    # depending on the fitted model, so resolve them instead of assuming.
+    lo <- intersect(c("lower.CL", "asymp.LCL", "lower.HPD"), names(emm_df))[1]
+    hi <- intersect(c("upper.CL", "asymp.UCL", "upper.HPD"), names(emm_df))[1]
+    validate(need(!is.na(lo) && !is.na(hi) && "emmean" %in% names(emm_df),
+                  "Estimated marginal means are not available for this model."))
+    p <- ggplot(emm_df, aes(x = Time_fac, y = emmean, color = Condition, group = Condition)) +
       geom_line(position = position_dodge(0.3), linewidth = 0.8) +
+      geom_errorbar(aes(ymin = .data[[lo]], ymax = .data[[hi]]),
+                    position = position_dodge(0.3), width = 0.2, linewidth = 0.6) +
+      geom_point(position = position_dodge(0.3), size = 3) +
       scale_color_manual(values = cols) +
       labs(x = "Time", y = "Estimated Marginal Mean", title = "EMMs with 95% CI",
            subtitle = "From LMM; accounts for replicate random effects") +
       theme_publication(12)
+    wrap_legend_labels(p)
   })
   output$emm_plot <- renderPlot({ emm_plot_obj() })
   output$dl_emm_plot <- downloadHandler(
@@ -3723,6 +3838,16 @@ server <- function(input, output, session) {
     rs$Stat_Value <- rs[[yvar]]
     rs$Stratum <- if (length(strata_cols) == 0) "All data" else
       do.call(paste, c(lapply(strata_cols, function(cl) paste0(cl, "=", rs[[cl]])), sep = " | "))
+    # Order strata by their real values, so numeric levels read 0, 60, 120
+    # rather than sorting as text ("0", "120", "60").
+    if (length(strata_cols) > 0) {
+      key <- unique(rs[, c("Stratum", strata_cols), drop = FALSE])
+      ord <- do.call(order, lapply(strata_cols, function(cl) {
+        v <- key[[cl]]; nv <- suppressWarnings(as.numeric(as.character(v)))
+        if (all(is.na(nv) == is.na(v))) nv else as.character(v)
+      }))
+      rs$Stratum <- factor(rs$Stratum, levels = key$Stratum[ord])
+    }
     out <- rs %>% group_by(Stratum) %>% group_modify(function(d, key) {
       d <- d[is.finite(d$Stat_Value) & is.finite(d[[pred]]), , drop = FALSE]
       n_lvls <- length(unique(d[[pred]]))
@@ -3755,7 +3880,10 @@ server <- function(input, output, session) {
     p <- ggplot(tr$rs, aes(x = .data[[tr$pred]], y = Stat_Value)) +
       geom_point(size = 2.5, alpha = 0.8, color = "#3498DB") +
       geom_smooth(method = "lm", se = TRUE, linewidth = 1, color = "black", alpha = 0.15) +
-      facet_wrap(~ Stratum, scales = "free_y") +
+      # Stratum labels are verbose ("col=value | col=value"); wrap them so the
+      # facet strips stay inside their panels instead of being clipped.
+      facet_wrap(~ Stratum, scales = "free_y",
+                 labeller = labeller(Stratum = function(x) wrap_axis_labels(x, 26))) +
       labs(x = tr$pred, y = paste0(unit_lbl, " of ", tr$measure),
            title = paste("Dose-Response Trend --", tr$measure),
            subtitle = "Each point = one biological replicate; line = linear fit with 95% CI",
@@ -3845,6 +3973,10 @@ server <- function(input, output, session) {
       ref <- input$ref_condition %||% names(cols)[1]
       cols[!names(cols) %in% ref]
     }
+    # Keep the legend in the app's condition order (i.e. dose order) rather than
+    # letting a character column sort alphabetically (100nM before 12.5nM).
+    esd_plot$Condition <- factor(as.character(esd_plot$Condition),
+                                 levels = intersect(names(cols), unique(as.character(esd_plot$Condition))))
     style <- input$es_plot_style %||% "linepoint"
     p <- ggplot(esd_plot, aes(x = Time_min, y = .data[[yvar]], color = Condition)) +
       geom_hline(yintercept = 0, linetype = "dashed", color = "grey50")
@@ -3930,10 +4062,19 @@ server <- function(input, output, session) {
       }
     }
     if (isTRUE(input$pca_show_loadings)) {
-      ld <- as.data.frame(res$pca$rotation[, 1:2]); ld$Feature <- rownames(ld); sc <- input$pca_loading_scale
+      ld <- as.data.frame(res$pca$rotation[, 1:2]); ld$Feature <- rownames(ld)
+      # Scale the loading arrows to the spread of the scores. A fixed multiplier
+      # leaves every arrow (and its label) bunched at the origin whenever the
+      # scores span a wide range, which made the feature names unreadable.
+      score_rng <- max(abs(c(scores$PC1, scores$PC2)), na.rm = TRUE)
+      ld_max <- max(sqrt(ld$PC1^2 + ld$PC2^2), na.rm = TRUE)
+      auto_sc <- if (is.finite(ld_max) && ld_max > 0 && is.finite(score_rng)) 0.6 * score_rng / ld_max else 1
+      sc <- auto_sc * ((input$pca_loading_scale %||% 3) / 3)
       p <- p + geom_segment(data = ld, aes(x = 0, y = 0, xend = PC1 * sc, yend = PC2 * sc),
                             arrow = arrow(length = unit(0.2, "cm")), color = "grey30", inherit.aes = FALSE) +
-        geom_text(data = ld, aes(x = PC1 * sc * 1.1, y = PC2 * sc * 1.1, label = Feature), size = 3, color = "grey20", inherit.aes = FALSE)
+        geom_text(data = ld, aes(x = PC1 * sc * 1.08, y = PC2 * sc * 1.08, label = Feature),
+                  size = 3, color = "grey20", inherit.aes = FALSE,
+                  check_overlap = TRUE, fontface = "bold")
     }
     apply_custom_labs(p, input, "pca")
   })
@@ -4243,8 +4384,9 @@ server <- function(input, output, session) {
       geom_text(aes(label = cell_label), size = base_sz / 3, fontface = "bold") +
       labs(x = NULL, y = NULL, fill = "-log10(p)",
            title = "Multi-Feature Statistical Summary",
-           subtitle = paste0("Two-way ANOVA on replicate ", input$mf_summary %||% "median_val",
-                             "s. * p<0.05, ** p<0.01, *** p<0.001"))
+           subtitle = paste0("Two-way ANOVA on replicate ",
+                             if ((input$mf_summary %||% "median_val") == "mean_val") "means" else "medians",
+                             ". * p<0.05, ** p<0.01, *** p<0.001"))
 
     p <- p + switch(pal,
       "wyr" = scale_fill_gradient2(low = "white", mid = "#FFDD57", high = "#D94A4A", midpoint = 1.3),
@@ -4493,19 +4635,21 @@ server <- function(input, output, session) {
         p <- p + geom_text(aes(label = round(.data[[metric]], 2)), vjust = -1, size = base_sz / 4)
 
     } else if (ctype == "heatmap") {
+      # A true 2-D grid (conditions x timepoints) rather than every group
+      # squeezed onto one axis, which made the labels unreadable.
       if (grouping == "by_cond") {
-        dat$Group <- paste0(dat$Time_min, " min\n", dat$Condition)
-        dat$Group <- factor(dat$Group, levels = unique(dat[order(dat$Time_min, dat$Condition), "Group", drop = TRUE]))
+        p <- ggplot(dat, aes(x = Condition, y = Time_fac, fill = .data[[metric]]))
       } else {
-        dat$Group <- paste0(dat$Condition, "\n", dat$Time_min, " min")
-        dat$Group <- factor(dat$Group, levels = unique(dat[order(dat$Condition, dat$Time_min), "Group", drop = TRUE]))
+        dat$Condition <- factor(dat$Condition, levels = rev(levels(factor(dat$Condition))))
+        p <- ggplot(dat, aes(x = Time_fac, y = Condition, fill = .data[[metric]]))
       }
-      p <- ggplot(dat, aes(x = Group, y = "Value", fill = .data[[metric]])) +
-        geom_tile(color = "grey90", linewidth = 0.5) +
+      p <- p + geom_tile(color = "grey90", linewidth = 0.5) +
         scale_fill_viridis_c(option = "plasma", name = metric_label) +
-        labs(x = NULL, y = NULL, title = paste(metric_label, "Heatmap"))
+        labs(x = NULL, y = NULL, title = paste(metric_label, "Heatmap"),
+             subtitle = "Each tile = one condition at one timepoint")
       if (isTRUE(input$cm_show_values))
-        p <- p + geom_text(aes(label = round(.data[[metric]], 2)), size = base_sz / 3.5)
+        p <- p + geom_text(aes(label = round(.data[[metric]], 2)), size = base_sz / 3.5,
+                           color = "white", fontface = "bold")
 
     } else if (ctype == "bubble") {
       size_metric <- input$cm_bubble_size %||% "n_cells"
@@ -4676,7 +4820,7 @@ server <- function(input, output, session) {
               y_range <- diff(range(dat[[metric]], na.rm = TRUE))
             }
             bracket_base <- sig_annot$y_pos + y_range * 0.06
-            bracket_step <- y_range * 0.10
+            bracket_step <- y_range * (if ((input$cm_sig_label %||% "stars") == "stars_p") 0.17 else 0.10)
             for (tf in unique(sig_annot$Time_fac)) {
               idx <- which(sig_annot$Time_fac == tf)
               if (length(idx) > 1) {
@@ -4808,7 +4952,8 @@ server <- function(input, output, session) {
         geom_violin(position = position_dodge(0.8), alpha = 0.7, scale = "width", linewidth = 0.3, color = "grey30") +
         geom_point(data = rs, aes(x = Time_fac, y = median_val, fill = Condition, group = Condition),
                    position = position_dodge(0.8), shape = 21, size = 2.5, color = "black", stroke = 0.7) +
-        scale_fill_manual(values = cols) + labs(x = NULL, y = mlbl) + theme_publication(base) + theme(legend.position = "none")
+        scale_fill_manual(values = cols) + labs(x = NULL, y = mlbl, fill = "Condition") +
+        theme_publication(base) + theme(legend.position = "bottom")
     }
     if ("traj" %in% input$pub_panels) {
       ptj <- ggplot(rs, aes(x = Time_min, y = median_val, color = Condition)) +
@@ -4817,7 +4962,8 @@ server <- function(input, output, session) {
         scale_x_continuous(breaks = sort(unique(rs$Time_min))) + labs(x = "Time (min)", y = paste("Median", mlbl)) + theme_publication(base)
       if (length(unique(rs$Time_min)) >= 4) ptj <- ptj + geom_smooth(method = "loess", se = TRUE, alpha = 0.12, linewidth = 1.1, span = 1)
       else ptj <- ptj + stat_summary(fun = mean, geom = "line", linewidth = 1.1)
-      panels[["traj"]] <- ptj
+      # No in-panel legend: the composite carries one shared legend at the bottom
+      panels[["traj"]] <- ptj + theme(legend.position = "none")
     }
     if ("effect" %in% input$pub_panels) {
       esd <- es_data()
@@ -4847,10 +4993,15 @@ server <- function(input, output, session) {
         comp <- cr$df %>% group_by(Condition, Time_min, Phenotype) %>% summarise(n = n(), .groups = "drop") %>%
           group_by(Condition, Time_min) %>% mutate(pct = n / sum(n) * 100) %>% ungroup()
         comp$Time_fac <- factor(paste0(comp$Time_min, " min"), levels = paste0(sort(unique(comp$Time_min)), " min"))
+        # Facet strips shrink in a composite panel, so scale their text down to
+        # stop neighbouring strip labels from colliding.
         panels[["phenotype"]] <- ggplot(comp, aes(x = Time_fac, y = pct, fill = Phenotype)) +
-          geom_col(position = "stack", width = 0.7) + facet_wrap(~ Condition) +
+          geom_col(position = "stack", width = 0.7) +
+          facet_wrap(~ Condition, labeller = labeller(Condition = function(x) wrap_axis_labels(x, 14))) +
           labs(x = NULL, y = "% Cells") + theme_publication(base) +
-          theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+          theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none",
+                strip.text = element_text(size = rel(0.62), lineheight = 0.9),
+                panel.spacing = unit(4, "pt"))
       }
     }
     if ("cellmetrics" %in% input$pub_panels) {
@@ -4899,14 +5050,26 @@ server <- function(input, output, session) {
     panels <- pub_panels_list()
     if (length(panels) == 0) return(NULL)
     base <- input$pub_base_size %||% 11; mlbl <- measure_label()
-    labeled <- lapply(seq_along(panels), function(i) panels[[i]] + ggtitle(LETTERS[i]))
+    # Exactly one panel keeps its legend (the first); patchwork then collects it
+    # into a single shared legend below the figure. Whichever panels the user
+    # picks, no panel ends up with a legend spilling over its neighbours.
+    labeled <- lapply(seq_along(panels), function(i) {
+      panels[[i]] + ggtitle(LETTERS[i]) +
+        theme(legend.position = if (i == 1) "bottom" else "none")
+    })
     n_panels <- length(labeled)
     pub_title <- {
       ct <- input$pub_custom_title %||% ""
       if (nzchar(trimws(ct))) ct else paste(mlbl, "-- Time Course")
     }
-    patchwork::wrap_plots(labeled, ncol = if (n_panels == 1) 1 else 2) +
-      patchwork::plot_annotation(title = pub_title, theme = theme_publication(base))
+    # guides = "collect" lifts the single kept legend out of its panel and into
+    # one shared legend under the whole figure, so it cannot overflow a panel.
+    patchwork::wrap_plots(labeled, ncol = if (n_panels == 1) 1 else 2, guides = "collect") +
+      patchwork::plot_annotation(
+        title = pub_title,
+        theme = theme_publication(base) +
+          theme(legend.position = "bottom", legend.box = "horizontal",
+                legend.justification = "center"))
   })
 
   output$pub_plot <- renderPlot({ if (has_patchwork) pub_plot_obj() })
