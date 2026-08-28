@@ -12,7 +12,11 @@
 
 The **first run** installs the required R packages (a few minutes); after that the app opens in your web browser instantly. Keep the console window open while you work - closing it stops the app.
 
-Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macOS/Linux) does the same thing.
+### Or run it from RStudio
+
+Open **`CellMorphR.Rproj`** (or just **`app.R`**) and click the green **Run App** button. From any R console in the folder, `shiny::runApp()` does the same.
+
+Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macOS/Linux) works too. Every route runs the same app and installs missing packages on first use.
 
 ### Versions
 
