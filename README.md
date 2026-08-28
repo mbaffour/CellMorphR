@@ -21,7 +21,18 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 | **3.0.0** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
-Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases). See [METHODS.md](METHODS.md) for a citable description of how figures are plotted and statistics computed.
+Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
+
+### Try it with the example data
+
+Two example files ship with the app - load either from the Data tab:
+
+| File | Design |
+|------|--------|
+| `example_data.csv` | Time course: 4 conditions x 4 timepoints x 3 biological replicates |
+| `example_data_no_timepoints.csv` | Single snapshot: 4 samples x 3 replicates, no time column |
+
+**[DATA_FORMAT.md](DATA_FORMAT.md)** explains exactly how to lay out your own file (one row per cell; `Condition` and `Replicate` required, `Time_min` optional). See [METHODS.md](METHODS.md) for a citable description of how figures are plotted and statistics computed.
 
 **A statistical analysis suite for time-resolved single-cell morphometry data from bacteriophage infection experiments.**
 

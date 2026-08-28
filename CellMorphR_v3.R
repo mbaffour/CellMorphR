@@ -152,9 +152,13 @@ validate_data <- function(df, col_map = NULL) {
     rep_col  <- col_map$replicate
   }
 
+  # Time is optional: many experiments are a single snapshot of several samples
+  # with no time course at all. When absent we synthesise a single timepoint so
+  # the rest of the app keeps working, and mark it so nothing is labelled "min".
+  synthetic_time <- is.null(time_col)
+
   missing_roles <- c(
     if (is.null(cond_col)) "Condition/Group",
-    if (is.null(time_col)) "Time/Timepoint",
     if (is.null(rep_col))  "Replicate/Experiment"
   )
 
@@ -171,13 +175,18 @@ validate_data <- function(df, col_map = NULL) {
   # Rename to standard names internally
   df2 <- df
   if (cond_col != "Condition") { df2$Condition <- df2[[cond_col]] }
-  if (time_col != "Time_min")  { df2$Time_min  <- suppressWarnings(as.numeric(df2[[time_col]])) }
+  if (synthetic_time) {
+    df2$Time_min <- 0
+  } else if (time_col != "Time_min") {
+    df2$Time_min <- suppressWarnings(as.numeric(df2[[time_col]]))
+  }
   if (rep_col  != "Replicate") { df2$Replicate <- df2[[rep_col]] }
 
   # Exclude meta + ID-like from measurements
   meta_cols <- unique(c("Condition", "Time_min", "Replicate",
                          cond_col, time_col, rep_col,
                          "Image", "Cell_ID", "ID"))
+  meta_cols <- meta_cols[!vapply(meta_cols, is.null, logical(1))]
   measure_cols <- setdiff(nms, meta_cols)
   measure_cols <- measure_cols[sapply(df2[measure_cols], function(x) is.numeric(x))]
   id_pattern <- grepl("^id$|_id$|^id_|cell.?id|object.?id|label$|^index$", measure_cols, ignore.case = TRUE)
@@ -192,8 +201,11 @@ validate_data <- function(df, col_map = NULL) {
                 msg = "No numeric measurement columns found. All numeric columns are constant or excluded."))
   }
 
-  list(ok = TRUE, needs_mapping = FALSE, msg = "Data loaded successfully.",
-       measures = measure_cols, df = df2,
+  list(ok = TRUE, needs_mapping = FALSE,
+       msg = if (synthetic_time)
+               "Data loaded successfully. No time column found - samples will be compared directly."
+             else "Data loaded successfully.",
+       measures = measure_cols, df = df2, synthetic_time = synthetic_time,
        cond_col = cond_col, time_col = time_col, rep_col = rep_col)
 }
 
@@ -808,7 +820,8 @@ compute_cell_metrics <- function(df, feature) {
 # =============================================================================
 # RAW HEATMAP DATA HELPER
 # =============================================================================
-compute_raw_heatmap_data <- function(df, features, stat_fn = "mean") {
+compute_raw_heatmap_data <- function(df, features, stat_fn = "mean",
+                                     time_fmt = function(v) paste0(v, " min")) {
   fn_val <- if (stat_fn == "median") "median_val" else "mean_val"
   rs_list <- lapply(features, function(m) {
     compute_replicate_summaries(df, m) %>%
@@ -819,7 +832,7 @@ compute_raw_heatmap_data <- function(df, features, stat_fn = "mean") {
   res <- bind_rows(rs_list)
   # Single-line label: these are drawn on an angled axis, where an embedded
   # line break makes the two lines cross each other.
-  res$Group <- paste0(res$Condition, " | ", res$Time_min, " min")
+  res$Group <- paste0(res$Condition, " | ", time_fmt(res$Time_min))
   res
 }
 
@@ -1385,16 +1398,25 @@ ui <- page_navbar(
           uiOutput("condition_order_ui"),
           tags$hr(),
           tags$details(
-            tags$summary(tags$strong("Rename conditions (legend labels)", style = "cursor:pointer;")),
+            tags$summary(tags$strong("Rename samples (labels on graphs)", style = "cursor:pointer;")),
             tags$div(class = "pt-2",
               tags$p(class = "small text-muted",
-                "Edit how each condition is written everywhere -- legends, axes, tables, exports.
+                "Edit how each sample is written everywhere -- legends, axes, tables, exports.
                  Names must stay unique."),
+              tags$p(tags$strong("Conditions"), class = "small mb-1"),
               actionButton("rename_remove_underscores", "Replace all underscores with spaces",
                 class = "btn-outline-secondary btn-sm w-100 mb-2", icon = icon("broom")),
               uiOutput("condition_rename_ui"),
               actionButton("rename_conditions_apply", "Apply new names",
-                class = "btn-outline-primary btn-sm w-100", icon = icon("pen"))
+                class = "btn-outline-primary btn-sm w-100", icon = icon("pen")),
+              tags$hr(),
+              tags$p(tags$strong("Timepoints"), class = "small mb-1"),
+              tags$p(class = "small text-muted",
+                "Rename how timepoints appear (e.g. \"Uninduced\", \"1 h\"). The underlying
+                 numeric time is unchanged, so ordering, trajectories and the trend test still work."),
+              uiOutput("time_rename_ui"),
+              actionButton("rename_times_apply", "Apply timepoint labels",
+                class = "btn-outline-primary btn-sm w-100", icon = icon("clock"))
             )
           ),
           tags$hr(),
@@ -1453,10 +1475,12 @@ ui <- page_navbar(
         tags$p(tags$strong("Show Samples"), class = "mb-1"),
         uiOutput("dist_sample_filter_ui"),
         tags$hr(),
-        tags$p(tags$strong("Show Timepoints"), class = "mb-1"),
-        uiOutput("dist_time_filter_ui"),
-        tags$hr(),
+        conditionalPanel("output.has_timecourse",
+          tags$p(tags$strong("Show Timepoints"), class = "mb-1"),
+          uiOutput("dist_time_filter_ui"),
+          tags$hr()),
         # ── X-axis grouping ──────────────────────────────────────────
+        conditionalPanel("output.has_timecourse",
         radioButtons("dist_grouping_mode", "Arrange X axis by",
           choices = c(
             "Timepoint — conditions dodge"  = "by_time",
@@ -1464,7 +1488,7 @@ ui <- page_navbar(
           ),
           selected = "by_time", inline = FALSE),
         tags$p(class="small text-muted", style="margin-top:-6px;margin-bottom:6px;font-size:10px;",
-          "Pick which variable sits on the X axis. The other variable becomes the fill/dodge colour."),
+          "Pick which variable sits on the X axis. The other variable becomes the fill/dodge colour.")),
         tags$hr(),
         radioButtons("dist_type", "Plot Type",
           choices = c("Violin + Medians" = "violin", "Strip (Jitter)" = "strip",
@@ -2206,9 +2230,53 @@ server <- function(input, output, session) {
   output$has_data <- reactive({ !is.null(raw_data()) })
   outputOptions(output, "has_data", suspendWhenHidden = FALSE)
 
+  # Lets the UI hide time-specific controls for single-snapshot experiments
+  output$has_timecourse <- reactive({ !is.null(raw_data()) && has_time() })
+  outputOptions(output, "has_timecourse", suspendWhenHidden = FALSE)
+
   # --- Column mapping state ---
   pending_raw <- reactiveVal(NULL)   # holds raw df while user maps columns
   col_map_rv  <- reactiveVal(NULL)   # holds confirmed col_map
+
+  # --- Timepoint display labels -------------------------------------------
+  # Time_min stays numeric (ordering, trend tests, trajectories depend on it);
+  # only how each timepoint is *written* on figures is user-editable.
+  time_label_map <- reactiveVal(NULL)   # named chr: names = as.character(Time_min)
+  time_synthetic <- reactiveVal(FALSE)  # TRUE when the file had no time column
+
+  # TRUE when the experiment really has a time dimension worth plotting
+  has_time <- reactive({
+    if (isTRUE(time_synthetic())) return(FALSE)
+    length(time_values()) > 1 || !identical(as.numeric(time_values()), 0)
+  })
+
+  fmt_time <- function(v) {
+    key <- as.character(v)
+    m <- time_label_map()
+    out <- if (!is.null(m)) unname(m[key]) else rep(NA_character_, length(key))
+    dflt <- if (isTRUE(time_synthetic())) rep("All samples", length(key)) else paste0(key, " min")
+    ifelse(is.na(out) | !nzchar(out), dflt, out)
+  }
+
+  # Timepoints present in the data, in numeric order
+  time_values <- reactive({
+    req(raw_data())
+    tv <- suppressWarnings(as.numeric(as.character(raw_data()$Time_min)))
+    sort(unique(tv[!is.na(tv)]))
+  })
+
+  # Apply a set of timepoint labels; blanks fall back to the "<n> min" default
+  apply_time_labels <- function(labels) {
+    tv <- isolate(time_values())
+    if (length(tv) == 0) return(invisible(FALSE))
+    labels <- trimws(as.character(labels))
+    labels[!nzchar(labels)] <- paste0(tv[!nzchar(labels)], " min")
+    if (anyDuplicated(labels)) {
+      showNotification("Timepoint labels must be unique.", type = "warning"); return(invisible(FALSE))
+    }
+    time_label_map(setNames(labels, as.character(tv)))
+    invisible(TRUE)
+  }
 
   # --- Rename conditions: change display names everywhere (legends, axes,
   # tables, stats, exports) by rewriting the values in the data itself. ---
@@ -2252,6 +2320,26 @@ server <- function(input, output, session) {
     apply_condition_rename(mapping)
   })
 
+  output$time_rename_ui <- renderUI({
+    req(time_values())
+    if (!has_time()) return(tags$p(class = "small text-muted",
+      "This dataset has no time column, so there are no timepoint labels to edit."))
+    tv <- time_values(); cur <- fmt_time(tv)
+    tagList(lapply(seq_along(tv), function(i)
+      textInput(paste0("time_rename_", i), NULL, value = cur[i], width = "100%")))
+  })
+
+  observeEvent(input$rename_times_apply, {
+    tv <- time_values(); req(length(tv) > 0)
+    cur <- fmt_time(tv)
+    new_t <- vapply(seq_along(tv), function(i) input[[paste0("time_rename_", i)]] %||% cur[i], character(1))
+    if (identical(trimws(new_t), cur)) {
+      showNotification("No changes to apply.", type = "message"); return()
+    }
+    if (isTRUE(apply_time_labels(new_t)))
+      showNotification("Timepoint labels updated on all figures.", type = "message")
+  })
+
   observeEvent(input$rename_remove_underscores, {
     req(raw_data())
     conds <- unique(as.character(raw_data()$Condition))
@@ -2272,6 +2360,8 @@ server <- function(input, output, session) {
     label_editor_prefix(prefix)
     cur <- function(id) isolate(input[[paste0(prefix, id)]]) %||% ""
     conds <- if (!is.null(isolate(raw_data()))) unique(as.character(isolate(raw_data())$Condition)) else character(0)
+    tvals <- if (!is.null(isolate(raw_data())) && isolate(has_time())) isolate(time_values()) else numeric(0)
+    tlabs <- if (length(tvals) > 0) fmt_time(tvals) else character(0)
     showModal(modalDialog(
       title = tagList(icon("pen"), paste0(" Edit figure text -- ", tab_title)),
       size = "l", easyClose = TRUE,
@@ -2287,13 +2377,19 @@ server <- function(input, output, session) {
           textInput("led_caption",  "Caption",      cur("_custom_caption"))
         ),
         tags$div(
-          tags$p(tags$strong("Legend / group names"), class = "mb-1"),
+          tags$p(tags$strong("Sample names"), class = "mb-1"),
           tags$p(class = "small text-muted",
-            "Renaming a condition applies everywhere: all figures, statistics tables, and exports."),
+            "Renaming applies everywhere: all figures, statistics tables, and exports."),
           actionButton("led_unders", "Replace underscores with spaces",
             class = "btn-outline-secondary btn-sm w-100 mb-2", icon = icon("broom")),
+          tags$p(tags$strong("Conditions"), class = "small mb-1"),
           lapply(seq_along(conds), function(i)
-            textInput(paste0("led_cond_", i), NULL, value = conds[i], width = "100%"))
+            textInput(paste0("led_cond_", i), NULL, value = conds[i], width = "100%")),
+          if (length(tvals) > 0) tagList(
+            tags$p(tags$strong("Timepoints"), class = "small mb-1 mt-2"),
+            lapply(seq_along(tvals), function(i)
+              textInput(paste0("led_time_", i), NULL, value = tlabs[i], width = "100%"))
+          )
         )
       ),
       footer = tagList(modalButton("Cancel"),
@@ -2328,6 +2424,11 @@ server <- function(input, output, session) {
       curv <- input[[paste0("led_cond_", i)]] %||% conds[i]
       updateTextInput(session, paste0("led_cond_", i), value = gsub("_", " ", curv, fixed = TRUE))
     }
+    tv <- time_values(); cur <- fmt_time(tv)
+    for (i in seq_along(tv)) {
+      curv <- input[[paste0("led_time_", i)]] %||% cur[i]
+      updateTextInput(session, paste0("led_time_", i), value = gsub("_", " ", curv, fixed = TRUE))
+    }
   })
 
   observeEvent(input$led_apply, {
@@ -2342,6 +2443,12 @@ server <- function(input, output, session) {
       conds <- unique(as.character(raw_data()$Condition))
       new_names <- vapply(seq_along(conds), function(i) input[[paste0("led_cond_", i)]] %||% conds[i], character(1))
       if (!identical(trimws(new_names), conds)) apply_condition_rename(setNames(new_names, conds))
+      tv <- time_values()
+      if (length(tv) > 0) {
+        cur <- fmt_time(tv)
+        new_t <- vapply(seq_along(tv), function(i) input[[paste0("led_time_", i)]] %||% cur[i], character(1))
+        if (!identical(trimws(new_t), cur)) apply_time_labels(new_t)
+      }
     }
     removeModal()
   })
@@ -2406,7 +2513,7 @@ server <- function(input, output, session) {
 
     if (val$ok) {
       # Perfect: load directly
-      finalize_load(val$df, val$measures)
+      finalize_load(val$df, val$measures, synthetic_time = isTRUE(val$synthetic_time))
     } else if (isTRUE(val$needs_mapping)) {
       # Show column mapping modal
       pending_raw(df)
@@ -2416,7 +2523,9 @@ server <- function(input, output, session) {
     }
   }
 
-  finalize_load <- function(df, measures) {
+  finalize_load <- function(df, measures, synthetic_time = FALSE) {
+    time_synthetic(isTRUE(synthetic_time))
+    time_label_map(NULL)
     df$Condition <- as.character(df$Condition)
     df$Time_min  <- suppressWarnings(as.numeric(df$Time_min))
     if (any(is.na(df$Time_min))) {
@@ -2431,8 +2540,9 @@ server <- function(input, output, session) {
     removeModal()
     showNotification(
       paste0("Loaded ", format(nrow(df), big.mark=","), " rows, ",
-             length(measures), " measurement columns."),
-      type = "message", duration = 5
+             length(measures), " measurement columns.",
+             if (isTRUE(synthetic_time)) " No time column found - samples are compared directly." else ""),
+      type = "message", duration = if (isTRUE(synthetic_time)) 9 else 5
     )
   }
 
@@ -2448,7 +2558,9 @@ server <- function(input, output, session) {
         "The app couldn't auto-detect required column roles. ",
         "Please assign which column represents each role below."),
       make_sel("map_cond_col", "Condition / Group column", guess_cond),
-      make_sel("map_time_col", "Time / Timepoint column",  guess_time),
+      selectInput("map_time_col", "Time / Timepoint column",
+                  choices = c("(no timepoints - compare samples directly)" = "__none__", all_cols),
+                  selected = if (!is.null(guess_time) && guess_time %in% all_cols) guess_time else "__none__"),
       make_sel("map_rep_col",  "Replicate / Experiment column", guess_rep),
       tags$hr(),
       tags$p(class="text-muted small",
@@ -2466,13 +2578,13 @@ server <- function(input, output, session) {
     req(pending_raw(), input$map_cond_col, input$map_time_col, input$map_rep_col)
     df <- pending_raw()
     cmap <- list(condition = input$map_cond_col,
-                 time      = input$map_time_col,
+                 time      = if (identical(input$map_time_col, "__none__")) NULL else input$map_time_col,
                  replicate = input$map_rep_col)
     val <- tryCatch(validate_data(df, col_map = cmap), error = function(e) {
       list(ok=FALSE, needs_mapping=FALSE, msg=paste("Error:", conditionMessage(e)))
     })
     if (val$ok) {
-      finalize_load(val$df, val$measures)
+      finalize_load(val$df, val$measures, synthetic_time = isTRUE(val$synthetic_time))
     } else {
       showNotification(val$msg, type="error", duration=10)
     }
@@ -2967,15 +3079,27 @@ server <- function(input, output, session) {
     })
     cols <- setNames(cols, cond_levels_now)
 
-    df$Time_fac <- factor(paste0(df$Time_min, " min"),
-                          levels = paste0(sort(unique(df$Time_min)), " min"))
+    df$Time_fac <- factor(fmt_time(df$Time_min),
+                          levels = fmt_time(sort(unique(df$Time_min))))
     if (!is.null(rs) && nrow(rs) > 0)
-      rs$Time_fac <- factor(paste0(rs$Time_min, " min"),
-                            levels = paste0(sort(unique(rs$Time_min)), " min"))
+      rs$Time_fac <- factor(fmt_time(rs$Time_min),
+                            levels = fmt_time(sort(unique(rs$Time_min))))
 
     # Grouping mode: by_time = X is time, fill=Condition; by_condition = X is Condition, fill=Time
     grp_mode <- input$dist_grouping_mode %||% "by_time"
-    if (grp_mode == "by_condition") {
+    x_is_fill <- FALSE
+    if (!has_time()) {
+      # No time dimension: plot the samples themselves side by side.
+      df$x_var_col <- df$Condition
+      df$fill_var  <- df$Condition
+      rs$x_var_col <- rs$Condition
+      rs$fill_var  <- rs$Condition
+      x_levels     <- levels(df$Condition)
+      fill_levels  <- levels(df$Condition)
+      x_label_base <- "Sample"
+      time_fill_cols <- cols
+      x_is_fill <- TRUE   # x axis already names each sample; legend would repeat it
+    } else if (grp_mode == "by_condition") {
       # Swap X and fill: X=Condition, fill/dodge=Time_fac
       # We temporarily rename for plotting so all downstream code sees Time_fac as the dodge variable
       df$x_var_col  <- df$Condition
@@ -3113,10 +3237,15 @@ server <- function(input, output, session) {
       }
 
     } else if (input$dist_type == "ridge" && has_ridges) {
-      df$Group <- interaction(df$Condition, df$Time_fac, sep = " | ")
-      group_levels <- rev(as.character(interaction(
-        rep(levels(df$Condition), length(levels(df$Time_fac))),
-        rep(levels(df$Time_fac), each = length(levels(df$Condition))), sep = " | ")))
+      if (has_time()) {
+        df$Group <- interaction(df$Condition, df$Time_fac, sep = " | ")
+        group_levels <- rev(as.character(interaction(
+          rep(levels(df$Condition), length(levels(df$Time_fac))),
+          rep(levels(df$Time_fac), each = length(levels(df$Condition))), sep = " | ")))
+      } else {
+        df$Group <- as.character(df$Condition)
+        group_levels <- rev(levels(df$Condition))
+      }
       df$Group <- factor(df$Group, levels = group_levels)
       p <- ggplot(df, aes(x = .data[[m]], y = Group, fill = Condition)) +
         ggridges::geom_density_ridges(alpha = 0.7, scale = 1.3, linewidth = 0.3) +
@@ -3326,17 +3455,26 @@ server <- function(input, output, session) {
     } else if (input$dist_type == "ecdf") {
       p <- ggplot(df, aes(x = .data[[m]], color = Condition)) +
         stat_ecdf(linewidth = 0.8) + scale_color_manual(values = cols) +
-        facet_wrap(~ Time_fac, nrow = 1) +
+        {if (has_time()) facet_wrap(~ Time_fac, nrow = 1) else NULL} +
         labs(x = mlbl, y = "Cumulative Proportion", title = paste("ECDF --", mlbl),
              subtitle = "Rightward shift = larger values")
     } else if (input$dist_type == "histogram") {
       bins <- input$dist_hist_bins %||% 40
-      p <- ggplot(df, aes(x = .data[[m]], fill = Time_fac)) +
-        geom_histogram(bins = bins, alpha = 0.7, position = "identity", linewidth = 0.2, color = "white") +
-        facet_wrap(~ Condition, scales = "free_y") +
-        scale_fill_viridis_d(option = "plasma", name = "Time") +
-        labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mlbl),
-             subtitle = "Faceted by condition; colored by timepoint")
+      if (has_time()) {
+        p <- ggplot(df, aes(x = .data[[m]], fill = Time_fac)) +
+          geom_histogram(bins = bins, alpha = 0.7, position = "identity", linewidth = 0.2, color = "white") +
+          facet_wrap(~ Condition, scales = "free_y") +
+          scale_fill_viridis_d(option = "plasma", name = "Time") +
+          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mlbl),
+               subtitle = "Faceted by condition; colored by timepoint")
+      } else {
+        p <- ggplot(df, aes(x = .data[[m]], fill = Condition)) +
+          geom_histogram(bins = bins, alpha = 0.7, position = "identity", linewidth = 0.2, color = "white") +
+          facet_wrap(~ Condition, scales = "free_y") +
+          scale_fill_manual(values = cols, guide = "none") +
+          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mlbl),
+               subtitle = "One panel per sample")
+      }
 
     } else if (input$dist_type == "stacked_bar") {
       breaks_q <- quantile(df[[m]], probs = seq(0, 1, 0.25), na.rm = TRUE)
@@ -3427,7 +3565,7 @@ server <- function(input, output, session) {
       }
 
       sig_res <- compute_sig_table(rs, pairs_list,
-        times = as.numeric(gsub(" min", "", times_fac)),
+        times = sort(unique(rs$Time_min)),
         sig_yvar = sig_yvar,
         test = input$stat_test %||% "welch",
         correction = input$stat_p_adjust %||% "holm",
@@ -3438,7 +3576,7 @@ server <- function(input, output, session) {
           else max(df[[m]][df$Time_min == tm], na.rm = TRUE)
         })
       sig_annot <- sig_res$annot
-      if (nrow(sig_annot) > 0) sig_annot$Time_fac <- paste0(sig_annot$Time_min, " min")
+      if (nrow(sig_annot) > 0) sig_annot$Time_fac <- fmt_time(sig_annot$Time_min)
       {
         if (nrow(sig_annot) > 0) {
           n_levels <- length(cond_levels)
@@ -3456,8 +3594,12 @@ server <- function(input, output, session) {
             x_center <- which(times_fac == sig_annot$Time_fac[k])
             cond1_idx <- which(cond_levels == sig_annot$Cond1[k]) - 1
             cond2_idx <- which(cond_levels == sig_annot$Cond2[k]) - 1
-            # Calculate dodge positions for each condition being compared
-            if (n_levels == 2) {
+            if (isTRUE(x_is_fill)) {
+              # Samples occupy whole x slots (no time dimension), so the bracket
+              # spans between slots rather than between dodged sub-positions.
+              x_left  <- cond1_idx + 1
+              x_right <- cond2_idx + 1
+            } else if (n_levels == 2) {
               x_left  <- x_center - dodge_w / 4
               x_right <- x_center + dodge_w / 4
             } else {
@@ -3579,6 +3721,9 @@ server <- function(input, output, session) {
     # Keep the replicate legend visible in sample-label mode when SuperPlot
     # encoding is active; otherwise hide the (redundant) fill legend as before.
     if (sample_x_mode && rep_encode == "none" && !cells_by_rep) p <- p + theme(legend.position = "none")
+    # When the x axis already names each sample, its colour legend is redundant
+    # (the Replicate legend, which is a shape scale, is kept).
+    if (isTRUE(x_is_fill) && !cells_by_rep) p <- p + guides(fill = "none", color = "none")
 
     apply_custom_labs(p, input, "dist")
   })
@@ -3591,6 +3736,8 @@ server <- function(input, output, session) {
   # === TRAJECTORY TAB ===
   traj_plot_obj <- reactive({
     req(rep_summ(), cond_summ(), input$traj_summary)
+    validate(need(has_time(),
+      "This dataset has no time column, so there is no trajectory to plot. Use the Distributions tab to compare samples directly."))
     rs <- rep_summ(); cs <- cond_summ(); cols <- cond_colors(); yvar <- input$traj_summary; mlbl <- measure_label()
     ylab <- if (yvar == "median_val") paste("Median", mlbl, "per Replicate") else paste("Mean", mlbl, "per Replicate")
     p <- ggplot()
@@ -4111,7 +4258,7 @@ server <- function(input, output, session) {
     vpct <- round(res$var_explained[2, 1:2] * 100, 1); cols <- cond_colors()
     ggplot(cen, aes(x = PC1, y = PC2, color = Condition)) +
       geom_path(aes(group = Condition), linewidth = 1.2, arrow = arrow(length = unit(0.25, "cm"), type = "closed")) +
-      geom_point(size = 4) + geom_text(aes(label = paste0(Time_min, " min")), vjust = -1, size = 3.5) +
+      geom_point(size = 4) + geom_text(aes(label = fmt_time(Time_min)), vjust = -1, size = 3.5) +
       scale_color_manual(values = cols) +
       labs(x = paste0("PC1 (", vpct[1], "%)"), y = paste0("PC2 (", vpct[2], "%)"),
            title = "Morphological Trajectory", subtitle = "Centroids connected over time") +
@@ -4200,7 +4347,7 @@ server <- function(input, output, session) {
 
   output$pca_diversity_table <- renderDT({
     req(pca_diversity_data()); dd <- pca_diversity_data()
-    dd$Time_label <- paste0(dd$Time_min, " min")
+    dd$Time_label <- fmt_time(dd$Time_min)
     show_cols <- c("Condition", "Time_label", "N_cells", "Hull_area", "PC1_var",
                    "PC2_var", "Mean_dist_centroid", "Centroid_PC1", "Centroid_PC2")
     datatable(dd[, show_cols], options = list(pageLength = 20, scrollX = TRUE, dom = 'tip'),
@@ -4211,8 +4358,8 @@ server <- function(input, output, session) {
 
   pca_diversity_plot_obj <- reactive({
     req(pca_diversity_data()); dd <- pca_diversity_data(); cols <- cond_colors()
-    dd$Time_fac <- factor(paste0(dd$Time_min, " min"),
-                          levels = paste0(sort(unique(dd$Time_min)), " min"))
+    dd$Time_fac <- factor(fmt_time(dd$Time_min),
+                          levels = fmt_time(sort(unique(dd$Time_min))))
     p1 <- ggplot(dd, aes(x = Time_fac, y = Hull_area, fill = Condition)) +
       geom_col(position = position_dodge(0.8), width = 0.7, alpha = 0.85) +
       scale_fill_manual(values = cols) +
@@ -4288,7 +4435,7 @@ server <- function(input, output, session) {
     req(cluster_result()); cr <- cluster_result()
     comp <- cr$df %>% group_by(Condition, Time_min, Phenotype) %>% summarise(n = n(), .groups = "drop") %>%
       group_by(Condition, Time_min) %>% mutate(pct = n / sum(n) * 100) %>% ungroup()
-    comp$Time_fac <- factor(paste0(comp$Time_min, " min"), levels = paste0(sort(unique(comp$Time_min)), " min"))
+    comp$Time_fac <- factor(fmt_time(comp$Time_min), levels = fmt_time(sort(unique(comp$Time_min))))
     p <- ggplot(comp, aes(x = Time_fac, y = pct, fill = Phenotype)) + geom_col(position = "stack", width = 0.7) +
       facet_wrap(~ Condition) + labs(x = "Time", y = "% Cells", title = "Phenotype Composition Over Time") +
       get_theme(input, "clust") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -4303,7 +4450,7 @@ server <- function(input, output, session) {
       summarise(Count = n(), .groups = "drop") %>%
       group_by(Condition, Time_min) %>%
       mutate(Total = sum(Count), Percent = round(Count / Total * 100, 1)) %>% ungroup()
-    comp$Time_label <- paste0(comp$Time_min, " min")
+    comp$Time_label <- fmt_time(comp$Time_min)
     datatable(comp[, c("Condition", "Time_label", "Phenotype", "Count", "Total", "Percent")],
       options = list(pageLength = 30, scrollX = TRUE, dom = 'tip'),
       caption = "Phenotype composition: exact counts and percentages per Condition × Time",
@@ -4439,7 +4586,7 @@ server <- function(input, output, session) {
     mcols <- if (!is.null(input$mf_features)) input$mf_features else measure_cols()
     req(length(mcols) >= 1)
     stat_fn <- input$mf_raw_stat %||% "mean"
-    heat <- compute_raw_heatmap_data(df, mcols, stat_fn)
+    heat <- compute_raw_heatmap_data(df, mcols, stat_fn, time_fmt = fmt_time)
     req(nrow(heat) > 0)
 
     # Z-score scaling per feature if requested
@@ -4588,10 +4735,10 @@ server <- function(input, output, session) {
 
     # Prepare factor columns (consistent " min" suffix format)
     all_times <- sort(unique(df$Time_min))
-    time_levels <- paste0(all_times, " min")
-    dat$Time_fac <- factor(paste0(dat$Time_min, " min"), levels = time_levels)
-    df$Time_fac <- factor(paste0(df$Time_min, " min"), levels = time_levels)
-    rs$Time_fac <- factor(paste0(rs$Time_min, " min"), levels = time_levels)
+    time_levels <- fmt_time(all_times)
+    dat$Time_fac <- factor(fmt_time(dat$Time_min), levels = time_levels)
+    df$Time_fac <- factor(fmt_time(df$Time_min), levels = time_levels)
+    rs$Time_fac <- factor(fmt_time(rs$Time_min), levels = time_levels)
 
     # --- Grouping axis logic ---
     if (grouping == "by_cond") {
@@ -4800,7 +4947,7 @@ server <- function(input, output, session) {
         times_fac_levels <- levels(df$Time_fac)
         if (is.null(times_fac_levels)) times_fac_levels <- unique(as.character(df$Time_fac))
         sig_res <- compute_sig_table(rs, pairs_list,
-          times = as.numeric(gsub(" min", "", times_fac_levels)),
+          times = sort(unique(rs$Time_min)),
           sig_yvar = sig_yvar,
           test = input$stat_test %||% "welch",
           correction = input$stat_p_adjust %||% "holm",
@@ -4811,7 +4958,7 @@ server <- function(input, output, session) {
             else max(dat[[metric]][dat$Time_min == tm], na.rm = TRUE)
           })
         sig_annot <- sig_res$annot
-        if (nrow(sig_annot) > 0) sig_annot$Time_fac <- paste0(sig_annot$Time_min, " min")
+        if (nrow(sig_annot) > 0) sig_annot$Time_fac <- fmt_time(sig_annot$Time_min)
         {
           if (nrow(sig_annot) > 0) {
             if (ctype %in% c("violin", "boxplot")) {
@@ -4946,8 +5093,8 @@ server <- function(input, output, session) {
     base <- input$pub_base_size %||% 11; df <- transformed_data(); rs <- rep_summ()
     cols <- cond_colors(); m <- input$measure; mlbl <- measure_label()
     if ("dist" %in% input$pub_panels) {
-      df$Time_fac <- factor(paste0(df$Time_min, " min"), levels = paste0(sort(unique(df$Time_min)), " min"))
-      rs$Time_fac <- factor(paste0(rs$Time_min, " min"), levels = paste0(sort(unique(rs$Time_min)), " min"))
+      df$Time_fac <- factor(fmt_time(df$Time_min), levels = fmt_time(sort(unique(df$Time_min))))
+      rs$Time_fac <- factor(fmt_time(rs$Time_min), levels = fmt_time(sort(unique(rs$Time_min))))
       panels[["dist"]] <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
         geom_violin(position = position_dodge(0.8), alpha = 0.7, scale = "width", linewidth = 0.3, color = "grey30") +
         geom_point(data = rs, aes(x = Time_fac, y = median_val, fill = Condition, group = Condition),
@@ -4992,7 +5139,7 @@ server <- function(input, output, session) {
       if (!is.null(cr)) {
         comp <- cr$df %>% group_by(Condition, Time_min, Phenotype) %>% summarise(n = n(), .groups = "drop") %>%
           group_by(Condition, Time_min) %>% mutate(pct = n / sum(n) * 100) %>% ungroup()
-        comp$Time_fac <- factor(paste0(comp$Time_min, " min"), levels = paste0(sort(unique(comp$Time_min)), " min"))
+        comp$Time_fac <- factor(fmt_time(comp$Time_min), levels = fmt_time(sort(unique(comp$Time_min))))
         # Facet strips shrink in a composite panel, so scale their text down to
         # stop neighbouring strip labels from colliding.
         panels[["phenotype"]] <- ggplot(comp, aes(x = Time_fac, y = pct, fill = Phenotype)) +
@@ -5035,7 +5182,7 @@ server <- function(input, output, session) {
     if ("morph_div" %in% input$pub_panels) {
       dd <- tryCatch(pca_diversity_data(), error = function(e) NULL)
       if (!is.null(dd) && nrow(dd) > 0) {
-        dd$Time_fac <- factor(paste0(dd$Time_min, " min"), levels = paste0(sort(unique(dd$Time_min)), " min"))
+        dd$Time_fac <- factor(fmt_time(dd$Time_min), levels = fmt_time(sort(unique(dd$Time_min))))
         panels[["morph_div"]] <- ggplot(dd, aes(x = Time_fac, y = Hull_area, fill = Condition)) +
           geom_col(position = position_dodge(0.8), width = 0.7, alpha = 0.85) +
           scale_fill_manual(values = cols) + labs(x = "Time", y = "Hull Area") +
