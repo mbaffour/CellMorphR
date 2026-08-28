@@ -313,6 +313,28 @@ format_p_value <- function(p) {
   ifelse(is.na(p), NA_character_, ifelse(p < 0.001, "<0.001", formatC(p, format = "f", digits = 4)))
 }
 
+# Point shapes offered wherever the user can choose one. Shapes 21-25 take a
+# fill colour (outline + fill); the rest are drawn in a single colour.
+SHAPE_CHOICES <- c(
+  "Circle (filled)"        = 21,
+  "Square (filled)"        = 22,
+  "Triangle (filled)"      = 24,
+  "Diamond (filled)"       = 23,
+  "Triangle down (filled)" = 25,
+  "Circle (solid)"         = 16,
+  "Square (solid)"         = 15,
+  "Triangle (solid)"       = 17,
+  "Diamond (solid)"        = 18,
+  "Circle (open)"          = 1,
+  "Square (open)"          = 0,
+  "Triangle (open)"        = 2,
+  "Diamond (open)"         = 5,
+  "Plus"                   = 3,
+  "Cross"                  = 4,
+  "Asterisk"               = 8
+)
+DEFAULT_REP_SHAPES <- c(21, 22, 24, 23, 25)
+
 # Split Condition labels like "pSJExD_gp75_100nM" into a numeric dose column
 # plus a base-label column (and generic part columns), so gradient designs can
 # be analyzed as vector x dose instead of N unrelated groups.
@@ -1512,6 +1534,12 @@ ui <- page_navbar(
           choices = c("Nothing (identical dots)" = "none",
                       "Point shape per replicate" = "shape"),
           selected = "none"),
+        conditionalPanel("input.dist_rep_encode == 'shape'",
+          tags$p(class = "small text-muted mb-1", "Shape for each replicate (also shown in the legend):"),
+          uiOutput("dist_rep_shape_ui")),
+        conditionalPanel("input.show_cell_points",
+          selectInput("dist_cell_shape", "Individual cell point shape",
+                      choices = SHAPE_CHOICES, selected = 19)),
         checkboxInput("dist_cells_by_rep", "Color individual cells by replicate", FALSE),
         checkboxInput("dist_show_n", "Show n (cells / replicates) under each group", FALSE),
         tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-4px;",
@@ -2450,6 +2478,16 @@ server <- function(input, output, session) {
     apply_condition_rename(mapping)
   })
 
+  output$dist_rep_shape_ui <- renderUI({
+    req(raw_data())
+    reps <- levels(factor(raw_data()$Replicate))
+    tagList(lapply(seq_along(reps), function(i) {
+      selectInput(paste0("dist_rep_shape_", i), paste("Replicate", reps[i]),
+                  choices = SHAPE_CHOICES,
+                  selected = DEFAULT_REP_SHAPES[((i - 1) %% length(DEFAULT_REP_SHAPES)) + 1])
+    }))
+  })
+
   output$time_rename_ui <- renderUI({
     req(time_values())
     if (!has_time()) return(tags$p(class = "small text-muted",
@@ -3278,7 +3316,13 @@ server <- function(input, output, session) {
     cells_by_rep <- isTRUE(input$dist_cells_by_rep)        # color raw cells by replicate
     df$Rep_fac <- factor(df$Replicate)
     rs$Rep_fac <- factor(rs$Replicate)
-    rep_shapes <- rep(c(21, 22, 24, 23, 25), length.out = max(1, nlevels(rs$Rep_fac)))
+    n_reps_lvl <- max(1, nlevels(rs$Rep_fac))
+    rep_shapes <- vapply(seq_len(n_reps_lvl), function(i) {
+      v <- suppressWarnings(as.numeric(input[[paste0("dist_rep_shape_", i)]]))
+      if (length(v) == 1 && !is.na(v)) v else DEFAULT_REP_SHAPES[((i - 1) %% length(DEFAULT_REP_SHAPES)) + 1]
+    }, numeric(1))
+    cell_shape <- suppressWarnings(as.numeric(input$dist_cell_shape %||% 19))
+    if (is.na(cell_shape)) cell_shape <- 19
     # Okabe-Ito colorblind-safe palette for replicate coloring
     okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
                    "#D55E00", "#CC79A7", "#999999")
@@ -3304,12 +3348,12 @@ server <- function(input, output, session) {
         if (isTRUE(input$show_cell_points)) {
           if (cells_by_rep) {
             p <- p + geom_point(aes(color = Rep_fac), position = position_jitter(width = 0.15, height = 0),
-                                size = 0.3, alpha = input$point_alpha) +
+                                size = 0.3, alpha = input$point_alpha, shape = cell_shape) +
               scale_color_manual(values = rep_cols, name = "Replicate",
                                  guide = guide_legend(override.aes = list(size = 3, alpha = 1)))
           } else {
             p <- p + geom_point(position = position_jitter(width = 0.15, height = 0),
-                                size = 0.3, alpha = input$point_alpha, color = "grey30")
+                                size = 0.3, alpha = input$point_alpha, color = "grey30", shape = cell_shape)
           }
         }
         if (isTRUE(input$show_group_mean))
@@ -3337,12 +3381,12 @@ server <- function(input, output, session) {
         if (isTRUE(input$show_cell_points)) {
           if (cells_by_rep) {
             p <- p + geom_point(aes(color = Rep_fac), position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
-                                size = 0.3, alpha = input$point_alpha) +
+                                size = 0.3, alpha = input$point_alpha, shape = cell_shape) +
               scale_color_manual(values = rep_cols, name = "Replicate",
                                  guide = guide_legend(override.aes = list(size = 3, alpha = 1)))
           } else {
             p <- p + geom_point(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
-                                size = 0.3, alpha = input$point_alpha, color = "grey30")
+                                size = 0.3, alpha = input$point_alpha, color = "grey30", shape = cell_shape)
           }
         }
         if (isTRUE(input$show_group_mean))
@@ -3416,13 +3460,13 @@ server <- function(input, output, session) {
           p <- ggplot(df, aes(x = Time_fac, y = .data[[m]])) +
             geom_point(aes(color = Rep_fac, group = Condition),
                        position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7),
-                       size = 0.6, alpha = 0.3) +
+                       size = 0.6, alpha = 0.3, shape = cell_shape) +
             scale_color_manual(values = rep_cols, name = "Replicate",
                                guide = guide_legend(override.aes = list(size = 3, alpha = 1)))
         } else {
           p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], color = Condition)) +
             geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7),
-                       size = 0.6, alpha = 0.15) + scale_color_manual(values = cols)
+                       size = 0.6, alpha = 0.15, shape = cell_shape) + scale_color_manual(values = cols)
         }
         if (isTRUE(input$show_group_mean))
           p <- p + stat_summary(aes(group = Condition), fun = if (stat_type == "mean") mean else median,
@@ -3450,9 +3494,11 @@ server <- function(input, output, session) {
         cell_alfa <- if (cells_by_rep) 0.3 else 0.15
         p <- ggplot(df, aes(x = Sample_Label, y = .data[[m]])) + {
           if (has_ggforce) ggforce::geom_sina(cell_aes, size = 0.5, alpha = cell_alfa,
-                                              maxwidth = 0.35, show.legend = cells_by_rep)
+                                              maxwidth = 0.35, show.legend = cells_by_rep,
+                                              shape = cell_shape)
           else geom_point(cell_aes, position = position_jitter(width = 0.15, height = 0),
-                          size = 0.5, alpha = cell_alfa, show.legend = cells_by_rep)
+                          size = 0.5, alpha = cell_alfa, show.legend = cells_by_rep,
+                          shape = cell_shape)
         }
         if (cells_by_rep) {
           p <- p + scale_color_manual(values = rep_cols, name = "Replicate",
@@ -3480,19 +3526,23 @@ server <- function(input, output, session) {
         if (cells_by_rep) {
           p <- ggplot(df, aes(x = Time_fac, y = .data[[m]])) + {
             if (has_ggforce) ggforce::geom_sina(aes(color = Rep_fac, group = interaction(Time_fac, Condition)),
-                                                position = position_dodge(0.8), size = 0.5, alpha = 0.3, maxwidth = 0.35)
+                                                position = position_dodge(0.8), size = 0.5, alpha = 0.3,
+                                                maxwidth = 0.35, shape = cell_shape)
             else geom_point(aes(color = Rep_fac, group = Condition),
-                            position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8), size = 0.5, alpha = 0.3)
+                            position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+                            size = 0.5, alpha = 0.3, shape = cell_shape)
           } + scale_color_manual(values = rep_cols, name = "Replicate",
                                  guide = guide_legend(override.aes = list(size = 3, alpha = 1)))
         } else {
           if (has_ggforce) {
             p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], color = Condition)) +
-              ggforce::geom_sina(position = position_dodge(0.8), size = 0.5, alpha = 0.15, maxwidth = 0.35) +
+              ggforce::geom_sina(position = position_dodge(0.8), size = 0.5, alpha = 0.15,
+                                 maxwidth = 0.35, shape = cell_shape) +
               scale_color_manual(values = cols)
           } else {
             p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], color = Condition)) +
-              geom_point(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8), size = 0.5, alpha = 0.15) +
+              geom_point(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+                         size = 0.5, alpha = 0.15, shape = cell_shape) +
               scale_color_manual(values = cols)
           }
         }

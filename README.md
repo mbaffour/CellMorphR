@@ -334,6 +334,10 @@ dot plot, ridge, ECDF, histogram, stacked quartile bar, pie, donut.
 - **Colour individual cells by replicate** - the classic Lord et al. (2020)
   SuperPlot
 - **Show n** - adds `n=cells, N=replicates` under each group
+- **Choose the shapes** - pick the point shape for each biological replicate
+  (filled, solid or open circles, squares, triangles, diamonds, plus, cross,
+  asterisk) and a separate shape for the individual cell points. The legend
+  follows your choice.
 
 **Significance brackets** are optional and off by default. When enabled they use
 the test and correction selected on the Statistics tab, so the figure and the
