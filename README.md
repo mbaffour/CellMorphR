@@ -22,7 +22,7 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 
 | Version | App file | Status |
 |---------|----------|--------|
-| **3.0.0** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. |
+| **3.1.1** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
 Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
@@ -870,7 +870,7 @@ If you use CellMorphR in your research, please cite:
   title   = {CellMorphR: Single-Cell Morphometry Analysis Suite for Bacteriophage Infection Experiments},
   year    = {2026},
   url     = {https://github.com/mbaffour/CellMorphR},
-  version = {3.0.0}
+  version = {3.1.1}
 }
 ```
 
