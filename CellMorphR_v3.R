@@ -2112,6 +2112,136 @@ ui <- page_navbar(
     )
   ),
 
+  # === TAB 11: GUIDE & SCRIPT BUILDER =========================================
+  nav_panel(
+    title = "Guide",
+    icon  = icon("book-open"),
+    navset_card_tab(
+      nav_panel("Quick Start",
+        tags$div(class = "p-3", style = "max-width:900px;",
+          uiOutput("guide_status"),
+          tags$h5("1. Load your data"),
+          tags$p("Go to the ", tags$strong("Data"), " tab and upload a .csv, .tsv or Excel file with ",
+                 tags$strong("one row per cell"), ". Two example files ship with the app in the ",
+                 tags$code("examples/"), " folder. You need:"),
+          tags$ul(
+            tags$li(tags$code("Condition"), " (or Sample / Group / Treatment) - the experimental group"),
+            tags$li(tags$code("Replicate"), " - the biological replicate. This is your true n."),
+            tags$li("at least one numeric measurement column (Length, Area, Circularity, ...)"),
+            tags$li(tags$code("Time_min"), " is ", tags$strong("optional"),
+                    " - leave it out for a single snapshot and samples are compared directly.")
+          ),
+          tags$h5("2. Pick a measurement"),
+          tags$p("Choose the Measurement Variable and reference (control) condition in the Data sidebar. ",
+                 "Everything else follows from that choice."),
+          tags$h5("3. Make the figure"),
+          tags$p("The ", tags$strong("Distributions"), " tab is the one you will use most. Turn on ",
+                 tags$em("Distinguish replicates by shape"), " to show sample-to-sample variation ",
+                 "honestly without any p-values (a SuperPlot; Lord et al. 2020, J Cell Biol)."),
+          tags$h5("4. Add statistics only if you need them"),
+          tags$p("On the ", tags$strong("Statistics"), " tab choose the grouping, test and correction, ",
+                 "then switch brackets on in the Distributions sidebar. Figures always use the same ",
+                 "settings as the tables. Every test runs on biological-replicate summaries, never on ",
+                 "individual cells."),
+          tags$h5("5. Edit and export"),
+          tags$p(icon("pen"), tags$strong(" Double-click any figure"),
+                 " to rename samples and timepoints or change any label. Then export as PDF, SVG, ",
+                 "TIFF, PNG, EPS, or an editable PowerPoint."),
+          tags$hr(),
+          tags$p(class = "text-muted small",
+            "Full documentation: README.md - data layout: DATA_FORMAT.md - citable methods: METHODS.md")
+        )
+      ),
+      nav_panel("Check My Data",
+        tags$div(class = "p-3", style = "max-width:900px;",
+          tags$p("A plain-language report of what the app detected in your file, and whether the ",
+                 "design supports the statistics you might want."),
+          actionButton("guide_check", "Check my data", class = "btn-primary", icon = icon("stethoscope")),
+          tags$hr(),
+          uiOutput("guide_report")
+        )
+      ),
+      nav_panel("Script Builder",
+        tags$div(class = "p-3",
+          tags$p("Build a ready-to-run R script that reproduces this analysis outside the app - ",
+                 "same helper functions, same statistics, same theme. Use it to re-run when data is ",
+                 "updated, batch over many measurements, or attach a reproducible script to a paper."),
+          layout_columns(col_widths = c(5, 7),
+            tags$div(
+              uiOutput("script_measure_ui"),
+              uiOutput("script_group_ui"),
+              selectInput("script_plot", "Figure",
+                choices = c("Violin + replicate points (SuperPlot)" = "violin",
+                            "Sina + replicate points" = "sina",
+                            "Box + replicate points" = "box",
+                            "Replicate dot plot only" = "dot"),
+                selected = "violin"),
+              selectInput("script_stat_unit", "Statistical unit",
+                choices = c("Replicate median" = "median_val", "Replicate mean" = "mean_val"),
+                selected = "median_val"),
+              selectInput("script_test", "Pairwise test",
+                choices = c("Welch's t-test" = "welch", "Wilcoxon rank-sum" = "wilcox"),
+                selected = "welch"),
+              selectInput("script_corr", "P-value correction",
+                choices = c("Holm" = "holm", "Benjamini-Hochberg" = "BH",
+                            "Bonferroni" = "bonferroni", "None" = "none"),
+                selected = "holm"),
+              checkboxInput("script_all_measures", "Loop over every measurement column", FALSE),
+              checkboxInput("script_trend", "Include dose-response trend test", FALSE),
+              conditionalPanel("input.script_trend",
+                uiOutput("script_trend_pred_ui")),
+              selectInput("script_fmt", "Figure format",
+                choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg", "TIFF" = "tiff"),
+                selected = "pdf"),
+              actionButton("script_build", "Generate script",
+                class = "btn-primary w-100 mt-2", icon = icon("wand-magic-sparkles")),
+              downloadButton("script_download", "Download .R file",
+                class = "btn-outline-primary w-100 mt-2")
+            ),
+            tags$div(
+              tags$p(tags$strong("Generated script"), class = "mb-1"),
+              tags$p(class = "small text-muted",
+                "Save this next to CellMorphR_v3.R and run:  Rscript my_analysis.R"),
+              verbatimTextOutput("script_preview")
+            )
+          )
+        )
+      ),
+      nav_panel("Statistics Help",
+        tags$div(class = "p-3", style = "max-width:900px;",
+          tags$h5("Your n is the number of biological replicates"),
+          tags$p("Thousands of cells from one experiment are not thousands of independent ",
+                 "observations. CellMorphR collapses each replicate to a single value before ",
+                 "any test, so cells cannot inflate significance (pseudoreplication)."),
+          tags$h5("Which test?"),
+          tags$ul(
+            tags$li(tags$strong("Welch's t-test"), " - the safe default for comparing two groups of ",
+                    "replicate summaries. Does not assume equal variance."),
+            tags$li(tags$strong("Wilcoxon rank-sum"), " - rank based, but needs a reasonable number ",
+                    "of replicates. With 2 vs 2 it can never reach p < 0.05."),
+            tags$li(tags$strong("Linear mixed model"), " - uses cell-level data with replicate as a ",
+                    "random effect. The best option when you only have 2 replicates."),
+            tags$li(tags$strong("Trend test"), " - for dose gradients, asks whether the measurement ",
+                    "changes with dose. One focused question instead of many pairwise ones.")
+          ),
+          tags$h5("Which correction?"),
+          tags$p(tags$strong("Holm"), " is a safe default. ", tags$strong("Benjamini-Hochberg"),
+                 " is appropriate when you are screening many features and can tolerate a ",
+                 "controlled false-discovery rate. Use ", tags$strong("none"),
+                 " only for a single pre-planned comparison."),
+          tags$h5("How many replicates do I need?"),
+          tags$p("Three or more independent experiments is the practical minimum for pairwise ",
+                 "p-values. With two, prefer the mixed model or a trend test, and present a ",
+                 "SuperPlot showing the replicate-level agreement."),
+          tags$h5("Reporting"),
+          tags$p("Report the test, the correction, the number of biological replicates, and an ",
+                 "effect size with its confidence interval - not a p-value alone. The Pairwise ",
+                 "table gives you all of these. METHODS.md contains a citable description.")
+        )
+      )
+    )
+  ),
+
   # === FOOTER ==================================================================
   nav_spacer(),
   nav_item(actionLink("theme_toggle", label = NULL,
@@ -5222,6 +5352,228 @@ server <- function(input, output, session) {
   output$pub_plot <- renderPlot({ if (has_patchwork) pub_plot_obj() })
   output$dl_pub <- downloadHandler(filename = function() paste0("figure_", input$measure, ".", fmt_ext(input$pub_format)),
     content = function(file) save_figure(file, pub_plot_obj(), input$pub_width, input$pub_height, input$pub_dpi, input$pub_format))
+
+  # === GUIDE / SCRIPT BUILDER =================================================
+  output$guide_status <- renderUI({
+    if (is.null(raw_data()))
+      return(tags$div(class = "alert alert-info py-2 px-3",
+        icon("circle-info"), " No data loaded yet. Start at step 1 below, or click ",
+        tags$strong("Load Demo Data"), " on the Data tab."))
+    tags$div(class = "alert alert-success py-2 px-3",
+      icon("circle-check"), sprintf(" %s cells loaded across %d sample(s)%s.",
+        format(nrow(raw_data()), big.mark = ","),
+        length(unique(raw_data()$Condition)),
+        if (has_time()) sprintf(" and %d timepoint(s)", length(time_values())) else ""))
+  })
+
+  guide_report_data <- eventReactive(input$guide_check, {
+    req(raw_data())
+    df <- raw_data()
+    reps <- df %>% dplyr::group_by(Condition, Time_min) %>%
+      dplyr::summarise(n_reps = dplyr::n_distinct(Replicate),
+                       n_cells = dplyr::n(), .groups = "drop")
+    list(df = df, reps = reps,
+         min_reps = min(reps$n_reps), max_reps = max(reps$n_reps),
+         n_cond = length(unique(df$Condition)),
+         measures = measure_cols(), has_time = has_time(),
+         n_times = length(time_values()))
+  })
+
+  output$guide_report <- renderUI({
+    r <- guide_report_data()
+    item <- function(ok, title, detail) {
+      cls <- if (ok == "good") "alert-success" else if (ok == "warn") "alert-warning" else "alert-danger"
+      ic  <- if (ok == "good") "circle-check" else if (ok == "warn") "triangle-exclamation" else "circle-xmark"
+      tags$div(class = paste("alert py-2 px-3 mb-2", cls),
+               icon(ic), tags$strong(paste0(" ", title)), tags$br(), tags$span(class = "small", detail))
+    }
+    tagList(
+      item("good", sprintf("%d samples, %d measurement columns", r$n_cond, length(r$measures)),
+           paste("Measurements found:", paste(utils::head(r$measures, 12), collapse = ", "),
+                 if (length(r$measures) > 12) "..." else "")),
+      if (r$has_time)
+        item("good", sprintf("Time course with %d timepoints", r$n_times),
+             "Trajectories, time-resolved statistics and the trend test are all available.")
+      else
+        item("good", "No time column - single snapshot design",
+             "Samples are compared directly. The Trajectories tab does not apply."),
+      if (r$min_reps >= 3)
+        item("good", sprintf("%d-%d biological replicates per group", r$min_reps, r$max_reps),
+             "Enough for pairwise tests. Welch's t-test with Holm correction is a sound default.")
+      else if (r$min_reps == 2)
+        item("warn", "Only 2 biological replicates in at least one group",
+             paste("Pairwise p-values are weak here (a t-test has about 1 degree of freedom, and a",
+                   "Wilcoxon test cannot reach p < 0.05 at all). Prefer the linear mixed model, a",
+                   "dose-response trend test, or present a SuperPlot without p-values."))
+      else
+        item("bad", "Only 1 biological replicate in at least one group",
+             paste("No hypothesis test is valid for that group - there is nothing to estimate",
+                   "sample-to-sample variability from. You can still plot the distributions.")),
+      if (r$max_reps >= 2 * max(1, r$min_reps))
+        item("warn", "Replicate counts are unbalanced across groups",
+             "Interpret comparisons cautiously; Welch's t-test is the right choice here.") else NULL,
+      tags$p(tags$strong("Cells and replicates per group"), class = "mt-3 mb-1"),
+      renderTable(head(as.data.frame(r$reps), 40))
+    )
+  })
+
+  output$script_measure_ui <- renderUI({
+    req(measure_cols())
+    selectInput("script_measure", "Measurement", choices = measure_cols(),
+                selected = input$measure %||% measure_cols()[1])
+  })
+  output$script_group_ui <- renderUI({
+    req(raw_data())
+    meta <- detect_metadata_columns(raw_data(), measure_cols())
+    sel <- intersect(c("Condition", if (has_time()) "Time_min"), meta)
+    checkboxGroupInput("script_groups", "Group comparisons by",
+                       choices = meta, selected = if (length(sel)) sel else meta[1])
+  })
+  output$script_trend_pred_ui <- renderUI({
+    req(raw_data())
+    num <- names(raw_data())[vapply(raw_data(), is.numeric, logical(1))]
+    num <- setdiff(num, c(measure_cols(), "Replicate"))
+    if (!length(num)) return(tags$p(class = "small text-muted",
+      "No numeric predictor column yet - use 'Split Condition into factors' on the Data tab to create one."))
+    selectInput("script_trend_pred", "Numeric predictor",
+                choices = num,
+                selected = grep("dose|conc", num, ignore.case = TRUE, value = TRUE)[1] %||% num[1])
+  })
+
+  build_analysis_script <- function() {
+    m      <- input$script_measure %||% (measure_cols() %||% "Length")[1]
+    groups <- input$script_groups %||% "Condition"
+    unit   <- input$script_stat_unit %||% "median_val"
+    test   <- input$script_test %||% "welch"
+    corr   <- input$script_corr %||% "holm"
+    fmt    <- input$script_fmt %||% "pdf"
+    plot_t <- input$script_plot %||% "violin"
+    ref    <- input$ref_condition %||% (unique(as.character(raw_data()$Condition))[1])
+    all_m  <- isTRUE(input$script_all_measures)
+    q  <- function(x) paste0('"', x, '"')
+    qv <- function(x) paste0("c(", paste(vapply(x, q, character(1)), collapse = ", "), ")")
+    unit_lab <- if (unit == "mean_val") "mean" else "median"
+    geom <- switch(plot_t,
+      violin = '    geom_violin(position = position_dodge(0.8), alpha = 0.7, scale = "width",\n                linewidth = 0.3, color = "grey30") +',
+      sina   = '    geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),\n                size = 0.4, alpha = 0.12) +',
+      box    = '    geom_boxplot(position = position_dodge(0.8), alpha = 0.6, outlier.shape = NA,\n                 linewidth = 0.4) +',
+      dot    = "")
+
+    L <- c(
+      "# =============================================================================",
+      paste0("# CellMorphR analysis script - generated ", format(Sys.Date())),
+      "#",
+      "# Run it with:   Rscript my_analysis.R",
+      "# Keep this file next to CellMorphR_v3.R (it reuses the app's own functions,",
+      "# so the numbers and the figure match what you saw in the app exactly).",
+      "# =============================================================================",
+      "",
+      'DATA_FILE <- "REPLACE_WITH_YOUR_FILE.csv"   # <- your data',
+      paste0('OUT_DIR   <- "cellmorphr_output"'),
+      "",
+      "suppressPackageStartupMessages(invisible(source(\"CellMorphR_v3.R\")))",
+      "dir.create(OUT_DIR, showWarnings = FALSE)",
+      "",
+      "# ---- 1. Load and validate ---------------------------------------------------",
+      "raw <- read.csv(DATA_FILE, check.names = FALSE)",
+      "v   <- validate_data(raw)",
+      'if (!isTRUE(v$ok)) stop("Data problem: ", v$msg)',
+      "d <- v$df",
+      'd$Replicate <- as.factor(d$Replicate)',
+      'cat("Loaded", nrow(d), "cells,", length(v$measures), "measurements\\n")',
+      "",
+      paste0("MEASURES <- ", if (all_m) "v$measures" else qv(m)),
+      paste0("GROUP_COLS <- ", qv(groups)),
+      paste0("REFERENCE  <- ", q(ref), "   # control / baseline condition"),
+      "",
+      "for (MEASURE in MEASURES) {",
+      '  cat("\\n=== ", MEASURE, " ===\\n", sep = "")',
+      "",
+      "  # ---- 2. Replicate-level summaries (this is your n) ------------------------",
+      "  rs <- compute_flexible_replicate_summary(d, MEASURE, GROUP_COLS,",
+      paste0("                                          yvar = ", q(unit), ")"),
+      "",
+      "  # ---- 3. Pairwise statistics on replicate summaries ------------------------",
+      '  groups_present <- sort(unique(as.character(rs$Statistics_Group)))',
+      "  ref_group <- grep(REFERENCE, groups_present, fixed = TRUE, value = TRUE)[1]",
+      "  if (is.na(ref_group)) ref_group <- groups_present[1]",
+      '  cmp <- build_comparison_table(rs, mode = "vs_reference", reference_group = ref_group)',
+      "  res <- run_pairwise_tests(rs, cmp,",
+      paste0("                            test = ", q(test), ", correction = ", q(corr), ","),
+      "                            reference_group = ref_group, measurement = MEASURE)",
+      "  print(res[, c(\"Group_1\", \"Group_2\", \"N_BioRep_Group_1\", \"N_BioRep_Group_2\",",
+      "                \"Difference_Group2_minus_Group1\", \"CI95_low\", \"CI95_high\",",
+      "                \"p_adj\", \"Significance\")])",
+      "  write.csv(res, file.path(OUT_DIR, paste0(\"stats_\", MEASURE, \".csv\")), row.names = FALSE)",
+      ""
+    )
+
+    if (isTRUE(input$script_trend) && !is.null(input$script_trend_pred)) {
+      L <- c(L,
+        "  # ---- 3b. Dose-response trend on replicate summaries -----------------------",
+        paste0("  PRED <- ", q(input$script_trend_pred)),
+        "  tr <- d %>% dplyr::group_by(dplyr::across(dplyr::all_of(c(PRED, \"Replicate\")))) %>%",
+        paste0("    dplyr::summarise(val = ", unit_lab, "(.data[[MEASURE]], na.rm = TRUE), .groups = \"drop\")"),
+        "  fit <- lm(val ~ tr[[PRED]], data = tr)",
+        '  cat("trend slope =", signif(coef(fit)[2], 4),',
+        '      " p =", signif(summary(fit)$coefficients[2, 4], 3),',
+        '      " R2 =", signif(summary(fit)$r.squared, 3), "\\n")',
+        "")
+    }
+
+    L <- c(L,
+      "  # ---- 4. SuperPlot figure --------------------------------------------------",
+      '  # reference condition first, so it sits at the left of each group',
+      '  d$Condition <- factor(d$Condition,',
+      '                        levels = c(REFERENCE, setdiff(sort(unique(as.character(d$Condition))), REFERENCE)))',
+      '  d$Time_fac <- factor(d$Time_min)',
+      '  rs_plot <- compute_replicate_summaries(d, MEASURE)',
+      '  rs_plot$Time_fac <- factor(rs_plot$Time_min)',
+      "  p <- ggplot(d, aes(x = Time_fac, y = .data[[MEASURE]], fill = Condition)) +")
+    if (nzchar(geom)) L <- c(L, geom)
+    L <- c(L,
+      "    geom_point(data = rs_plot,",
+      paste0("               aes(x = Time_fac, y = ", unit, ", fill = Condition,"),
+      "                   group = Condition, shape = factor(Replicate)),",
+      "               position = position_dodge(0.8), size = 2.6, colour = \"black\", stroke = 0.7) +",
+      '    scale_shape_manual(values = c(21, 22, 24, 23, 25), name = "Replicate") +',
+      "    scale_fill_manual(values = scales::hue_pal()(length(unique(d$Condition)))) +",
+      paste0("    labs(x = ", q(if (isolate(has_time())) "Time" else "Sample"),
+             ", y = ", q(m), ", fill = \"Condition\","),
+      paste0("         title = paste(MEASURE, \"by condition\"),"),
+      paste0("         subtitle = \"Points = biological replicate ", unit_lab, "s\","),
+      paste0("         caption = \"", if (test == "wilcox") "Wilcoxon rank-sum" else "Welch's t-test",
+             " on replicate ", unit_lab, "s, ", corr, "-corrected.\") +"),
+      "    theme_publication(12)",
+      "",
+      paste0("  ggsave(file.path(OUT_DIR, paste0(\"figure_\", MEASURE, \".", fmt, "\")),"),
+      "         p, width = 9, height = 5.5, dpi = 300)",
+      "}",
+      "",
+      'cat("\\nDone. Figures and statistics are in ", normalizePath(OUT_DIR), "\\n", sep = "")')
+    paste(L, collapse = "\n")
+  }
+
+  script_text <- reactiveVal("")
+  observeEvent(input$script_build, {
+    req(raw_data())
+    txt <- tryCatch(build_analysis_script(),
+                    error = function(e) paste("# Could not build script:", conditionMessage(e)))
+    script_text(txt)
+    showNotification("Script generated. Copy it, or use Download .R file.", type = "message")
+  })
+  output$script_preview <- renderText({
+    if (!nzchar(script_text()))
+      "# Choose your options on the left, then click 'Generate script'."
+    else script_text()
+  })
+  output$script_download <- downloadHandler(
+    filename = function() paste0("cellmorphr_analysis_", Sys.Date(), ".R"),
+    content = function(file) {
+      txt <- script_text()
+      if (!nzchar(txt)) txt <- build_analysis_script()
+      writeLines(txt, file)
+    })
 
   # --- Export each composite panel as an editable PPTX slide ---
   output$dl_pub_deck <- downloadHandler(

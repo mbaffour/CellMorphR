@@ -36,6 +36,8 @@ Two example files ship with the app - load either from the Data tab:
 | `example_data.csv` | Time course: 4 conditions x 4 timepoints x 3 biological replicates |
 | `example_data_no_timepoints.csv` | Single snapshot: 4 samples x 3 replicates, no time column |
 
+The app also has a built-in **Guide** tab: a quick start, a "Check My Data" report that tells you in plain language what it detected and whether your design supports the statistics you want, a statistics helper, and a **Script Builder** that writes a ready-to-run R script for your analysis.
+
 **[DATA_FORMAT.md](DATA_FORMAT.md)** explains exactly how to lay out your own file (one row per cell; `Condition` and `Replicate` required, `Time_min` optional). See [METHODS.md](METHODS.md) for a citable description of how figures are plotted and statistics computed.
 
 **A statistical analysis suite for time-resolved single-cell morphometry data from bacteriophage infection experiments.**
@@ -47,6 +49,7 @@ CellMorphR provides publication-ready visualization and statistically rigorous a
 ## Table of Contents
 
 - [Overview](#overview)
+- [In-app Guide and Script Builder](#scripting-your-analysis)
 - [The Problem CellMorphR Solves](#the-problem-cellmorphr-solves)
 - [Features](#features)
 - [Installation](#installation)
@@ -295,156 +298,179 @@ The technical replicates serve their purpose by providing more cells to estimate
 
 ---
 
-## R Shiny App â€” User Guide
+## R Shiny App - User Guide
+
+The app has **10 tabs**. You do not need all of them: load data, pick a
+measurement, and the Distributions tab already gives you a publication figure.
 
 ### 1. Data Tab
 
-**Purpose:** Upload, validate, and preview your dataset.
+Upload `.csv`, `.tsv`, `.xlsx`, or `.xls` (one row per cell - see
+[DATA_FORMAT.md](DATA_FORMAT.md)), or click **Load Demo Data** to explore
+immediately. Column roles are auto-detected; if detection fails you are asked to
+map them, and you may choose *"(no timepoints - compare samples directly)"*.
 
-**Workflow:**
-1. Click **Browse** and select your Excel or CSV file.
-2. The app validates the file, checking for required columns (`Condition`, `Time_min`, `Replicate`) and at least one numeric measurement column.
-3. On successful upload, the **Data Preview** table displays the first 500 rows, and three summary cards show:
-   - **Total Cells**: The total number of cell measurements in the dataset.
-   - **Conditions Ã— Time Points**: The factorial structure of your experiment.
-   - **Biological Replicates**: The number of replicates per group (your true N).
-4. Select your **Measurement Variable** from the dropdown (auto-populated from your numeric columns).
-5. Select your **Reference (control) condition** â€” this is used as the baseline for effect size calculations and statistical comparisons. The app auto-detects conditions containing "Uninfected", "Control", "WT", or "Mock" (case-insensitive).
+The sidebar controls everything downstream:
 
-**Demo Data:** Click **Load Demo Data** to generate a simulated bacteriophage infection dataset (~4,800 cells) with known ground-truth effects for testing all features.
+| Control | What it does |
+|---------|--------------|
+| **Measurement Variable** | Which column all the plots and statistics use |
+| **Reference (control) condition** | The baseline for effect sizes and "vs control" comparisons |
+| **Data transform** | None / log / sqrt, applied to every measurement |
+| **Colour palette** | 9 presets plus a per-condition colour picker |
+| **Rename samples** | Edit condition names and timepoint labels (see Editing figures below) |
+| **Split Condition into factors** | Turn `pSJExD_gp75_100nM` into a `Condition_Base` plus a numeric `Dose_nM` column, enabling factorial grouping and the trend test |
+| **Save / Resume session** | Write an `.rds` you can reload later |
 
 ### 2. Distributions Tab
 
-**Purpose:** Visualize single-cell distributions at each condition Ã— time point combination.
+The main figure tab. 11 plot types: violin, strip, sina, box+strip, replicate
+dot plot, ridge, ECDF, histogram, stacked quartile bar, pie, donut.
 
-**Plot types available (R Shiny app â€” 7 options):**
+**SuperPlot options** (the recommended default presentation):
 
-- **Violin + Jittered Medians** (default): Kernel density estimates showing the full probability distribution. Width represents estimated density â€” wider regions mean more cells at that value. Per-replicate medians are overlaid as filled circles with black outlines. Reveals skewness, multimodality, and outlier structure. Best for large datasets (~200+ cells per group).
+- **Distinguish replicates by shape** - each biological replicate gets its own
+  point shape, so reviewers see sample-to-sample agreement directly
+- **Colour individual cells by replicate** - the classic Lord et al. (2020)
+  SuperPlot
+- **Show n** - adds `n=cells, N=replicates` under each group
 
-- **Strip (Jitter)**: Every individual cell plotted as a point with random horizontal scatter. The most transparent visualization â€” nothing is smoothed, summarized, or hidden. Replicate medians overlaid as large markers. Widely used in eLife, Nature Methods, and PLOS Biology. Recommended for publication when transparency is the priority.
+**Significance brackets** are optional and off by default. When enabled they use
+the test and correction selected on the Statistics tab, so the figure and the
+tables can never disagree. Brackets are capped per timepoint so a crowded
+experiment stays readable; the caption states how many of the total comparisons
+are shown.
 
-- **Sina (Density-Jitter)**: Points spread proportionally to local density â€” wide where data is dense, narrow where sparse. Gives distribution shape from raw data without kernel smoothing artifacts. Best of both worlds between violin and strip. Requires the `ggforce` R package (`install.packages("ggforce")`).
-
-- **Dot Plot (Replicates Only)**: Shows ONLY the per-replicate medians (N=3 per group) with group mean crossbar â€” the actual data points used in the ANOVA. This is the most honest representation of statistical power and follows the SuperPlots framework (Lord et al., 2020, *Journal of Cell Biology*). Recommended for supplementary figures or when emphasizing the true N.
-
-- **Box + Strip**: Traditional box-and-whisker plots with per-replicate medians overlaid as diamond markers. Less informative than violins (hides distribution shape) but familiar to most reviewers.
-
-- **Ridge Plot**: Horizontally stacked density plots, useful when you have many condition Ã— time combinations and vertical space is limited. Requires the `ggridges` R package.
-
-- **ECDF (Empirical Cumulative Distribution Function)**: One panel per time point showing the cumulative proportion of cells at each measurement value. No binning or smoothing â€” completely assumption-free. A rightward shift of the +N4 curve relative to Uninfected indicates larger cells.
-
-**Python command-line equivalents (5 styles via `--plot-style`):**
-
-| Flag | Description |
-|------|-------------|
-| `--plot-style violin` | Kernel density violins (default) |
-| `--plot-style strip` | Jittered raw data points |
-| `--plot-style sina` | Density-proportional jitter |
-| `--plot-style box` | Box plots |
-| `--plot-style dotplot` | Replicate summaries only |
-
-**Controls:**
-- **Show replicate medians**: Toggle the overlay of per-replicate summary points.
-- **Show individual cells**: Toggle jittered raw data points (useful for small datasets; use low opacity for large ones).
-- **Point opacity**: Control transparency of individual cell points (0.02â€“0.5).
-- **Show significance brackets**: Overlay pairwise comparison results as brackets connecting the two conditions at each time point. Available for Violin, Strip, Sina, Box, and Dot Plot styles (not Ridge or ECDF). Three label styles:
-  - **Stars** (default): \*p<0.05, \*\*p<0.01, \*\*\*p<0.001, ns = not significant (APA convention)
-  - **Stars + p-value**: Stars with exact Holm-corrected p-value in parentheses
-  - **p-value only**: Just the exact Holm-corrected p-value
-- **Show non-significant (ns) brackets**: When unchecked, only brackets with p < 0.05 are shown. Many high-impact journals (Nature, Cell) prefer showing only significant comparisons. Default: ON (all brackets shown).
-
-> **What the brackets test (critical for transparency):**
-> The brackets perform a **Welch's two-sample *t*-test (two-sided, unequal variance assumed)** on the **per-replicate medians** â€” the same independent observations used in the ANOVA. With N = 3 biological replicates per group, each bracket compares 3 control medians against 3 treatment medians. This is the statistically correct approach: individual cells are technical measurements of the biological replicate and cannot be treated as independent (Lazic, 2010). **Holmâ€“Bonferroni correction** is applied across all time-point comparisons within the figure to control the family-wise error rate (Holm, 1979). The methodology caption printed below each annotated figure states the test, N, correction method, and number of comparisons. Significant brackets are drawn in black bold; non-significant brackets (if shown) are drawn in gray.
-- **Font size, Width, Height, DPI**: Customize figure dimensions for export.
-- **File format**: Choose from PDF (vector, recommended for journals), PNG (raster), SVG (vector, editable in Illustrator/Inkscape), TIFF (LZW compressed, required by some journals), or EPS (legacy vector format with cairo font embedding).
-- **Download Figure**: Exports in the selected format.
+Other controls: subset which samples/timepoints appear, swap which variable sits
+on the X axis, log axis, manual Y limits, label angle and wrapping.
 
 ### 3. Trajectories Tab
 
-**Purpose:** Track replicate-level summary statistics over time â€” the key figure for demonstrating a time-dependent infection effect.
+Replicate summaries over time, with loess or linear trend and SEM ribbons or
+error bars. Each point is one biological replicate; dashed lines connect
+replicates. With no time column this tab explains that there is nothing to plot
+and points you back to Distributions.
 
-**This is your most important figure.** Each point represents the median (or mean) cell measurement from one biological replicate at one time point. If infection increases cell size over time, you should see:
+### 4. Morphospace (PCA) Tab
 
-- **Uninfected trajectories**: Flat or slowly changing â€” cells maintain homeostatic size.
-- **+N4 trajectories**: Rising progressively â€” lysis inhibition prevents lysis, and cells continue to grow.
-- **Divergence**: The gap between conditions widens over time. This divergence IS the condition Ã— time interaction.
+PCA over all measurement columns. Sub-tabs: the cell-level morphospace scatter
+(optionally with centroids, density contours and loading vectors), a loadings
+bar chart showing which features drive PC1/PC2, centroid **trajectories** over
+time, morphological **diversity** metrics (convex hull area, PC variance, mean
+distance to centroid), and a scree plot. Features can be excluded from the PCA
+in the sidebar.
 
-**Controls:**
-- **Summary Statistic**: Choose Median (robust to outliers and skewness; recommended) or Mean.
-- **Add trend line (loess)**: Fits a locally estimated scatterplot smoothing curve per condition. The confidence band shows the uncertainty in the trend.
-- **Show SEM ribbon**: Displays standard error of the mean of per-replicate summaries â€” an honest measure of biological variability at N=3.
-- **Connect individual replicates**: Draws dashed lines connecting the same biological replicate across time points, showing individual replicate trajectories.
-- **Style**: "Points + Lines" shows individual replicate points with error bars; "Points + Ribbon" uses a continuous SEM ribbon behind the trend.
+### 5. Phenotypes Tab
 
-**Interpreting the plot:**
-- Parallel trajectories: No differential effect of infection over time (no interaction).
-- Diverging trajectories: The infection effect depends on time (significant interaction) â€” cell size is increasingly affected as infection progresses.
-- Converging trajectories: An initial effect that diminishes (e.g., recovery or lysis).
+Unsupervised clustering (k-means or Ward hierarchical), optionally on principal
+components, with automatic k selection by silhouette. Shows the optimal-k curve,
+morphospace coloured by phenotype, phenotype composition over time, and a
+per-cluster characterisation table.
 
-### 4. Statistics Tab
+### 6. Statistics Tab
 
-**Purpose:** Formal hypothesis testing with correct handling of the hierarchical data structure.
+Build the comparison you actually want:
 
-**Analysis methods available:**
+1. Pick the measurement and the **metadata columns that define your groups**
+   (Condition alone, Condition + Time, Vector + Dose, and so on).
+2. Choose the **statistical unit** - replicate medians or means.
+3. Choose the **comparison mode** - each group vs a reference, all pairwise,
+   pairwise within each timepoint, or pairwise within each condition.
+4. Choose the **test** (Welch's t-test or Wilcoxon rank-sum) and the
+   **correction** (Holm, Benjamini-Hochberg, Bonferroni, none).
 
-- **Two-way ANOVA on replicate summaries** (recommended): The transparent, conservative approach.
-  1. Collapses ~200 cells per replicate to a single median (or mean) â€” yielding 24 data points (2 conditions Ã— 4 times Ã— 3 replicates).
-  2. Performs a two-way factorial ANOVA testing:
-     - **Condition main effect**: Are infected cells larger overall (across all time points)?
-     - **Time main effect**: Does cell size change over time (across both conditions)?
-     - **Condition Ã— Time interaction**: **THE KEY TEST.** Does the infection effect change as a function of time? A significant interaction means the gap between conditions widens (or narrows) over time.
-  3. Conducts pairwise comparisons at each time point using Welch's two-sample t-tests (unequal variance) with Holm correction for multiple comparisons.
+**Suggest Test & Settings** inspects your design and explains what it recommends
+and why, rather than silently choosing for you.
 
-- **Linear Mixed Model** (requires `lme4`, `lmerTest`, and `emmeans` packages): A more sophisticated approach that analyzes all cell-level data while accounting for the nested structure.
-  - Model: `Measurement ~ Condition * Time + (1|Rep_unique)`
-  - The random intercept `(1|Rep_unique)` absorbs the correlation among cells within the same dish, correctly partitioning biological variability from measurement variability. Replicate IDs are automatically made unique across conditions to prevent cross-condition ID collisions (see [Linear Mixed Models](#linear-mixed-models-alternative) in the methodology section).
-  - Satterthwaite-approximated p-values via `lmerTest` (install separately: `install.packages("lmerTest")`).
-  - Pairwise comparisons via estimated marginal means (`emmeans`).
-  - More statistically powerful than the ANOVA approach (uses all cell-level information, not just replicate summaries), but the assumptions are harder to verify and the output is less intuitive for non-statisticians.
+Sub-tabs: Group Preview, Comparison Preview, Test Suggestion, Descriptive
+statistics, Results, **Pairwise** (with 95% CI, degrees of freedom, effect
+direction and per-comparison warnings), **Trend**, EMM Plot, and About.
 
-**Output:**
-- **ANOVA Table**: Sum of squares, degrees of freedom, mean squares, F-statistics, and p-values for each term. Look at the **Condition:Time interaction** row â€” this is your primary result.
-- **Pairwise Comparisons Table**: Condition differences at each time point with raw and Holm-adjusted p-values and significance markers (ns, *, **, ***).
-- **Download Results**: Saves the full statistical output as a text file.
+An optional global model is available: two-way ANOVA on replicate summaries
+(with partial eta-squared and a Shapiro-Wilk residual check) or a linear mixed
+model with replicate as a random effect and emmeans contrasts.
 
-### 5. Effect Sizes Tab
+**Small-n guardrails.** With two replicates per group the app warns you that a
+Wilcoxon test can never reach p < 0.05 (minimum attainable p = 0.33) and that a
+t-test has about 1 degree of freedom, and points you at the mixed model or the
+trend test instead.
 
-**Purpose:** Quantify the magnitude of infection effects independently of p-values.
+**Trend sub-tab (dose-response).** Fits replicate summaries against a numeric
+predictor (for example `Dose_nM`) within each stratum and reports slope, 95% CI,
+p, R-squared and a Spearman rank check, Holm-corrected across strata. For
+gradient designs this is usually both more powerful and more appropriate than
+dozens of pairwise tests.
 
-P-values tell you **whether** an effect exists; effect sizes tell you **how big** it is. With N=3 biological replicates, even real, biologically meaningful effects may not reach the conventional p < 0.05 threshold due to limited statistical power. A consistent 30% increase in cell area across all three replicates is biologically significant regardless of p-value.
+### 7. Effect Sizes Tab
 
-**Metrics available:**
+Absolute difference, percent change, or Cohen's d against the reference
+condition over time, as lines, points, or magnitude-scaled bubbles. P-values
+tell you whether an effect exists; this tab tells you how big it is.
 
-- **Absolute difference** (Treatment âˆ’ Control): The raw difference in the summary statistic (e.g., median area) between conditions at each time point. Units match the measurement variable.
+### 8. Multi-Feature Tab
 
-- **Percent change from control** (recommended): Normalizes the effect by the control level. Intuitive interpretation: "Infected cells are 25% larger at 60 min, 80% larger at 90 min, and 125% larger at 120 min." This communicates biological magnitude directly and is comparable across different measurement variables.
+Runs the analysis across **every** measurement at once: a significance heatmap
+(two-way ANOVA per feature, stars or p-values in the cells), a raw-value heatmap
+(optionally z-scored), a spider/radar comparison, a partial eta-squared feature
+importance chart, and a divergence table giving the earliest timepoint at which
+each feature separates from control.
 
-- **Cohen's d** (replicate-level): The standardized mean difference â€” the difference between condition means divided by the pooled standard deviation of the replicate summaries. Conventionally, d = 0.2 is "small," d = 0.5 is "medium," and d = 0.8 is "large." However, in tightly controlled experiments with low between-replicate variability, even d = 0.5 may represent a biologically dramatic effect.
+### 9. Cell Metrics Tab
 
-**Output:**
-- **Effect Size Plot**: A trajectory of the chosen metric over time. An upward trend indicates a progressively stronger infection effect.
-- **Effect Size Table**: Numeric values at each time point for precise reporting.
+Population-level summaries (mean, median, SD, IQR, CV%, skewness, quartiles, n)
+for any measurement, drawn as bar, line, violin, boxplot, ridgeline, ECDF,
+scatter, hexbin, heatmap, bubble, or radar charts - with the same
+replicate-level significance brackets available.
 
-### 6. Publication Figure Tab
+### 10. Pub Figure Tab
 
-**Purpose:** Assemble a composite multi-panel figure suitable for journal submission.
-
-**Panels available:**
-- **A: Distributions** â€” Distribution plot (style selectable: violin, strip, sina, box, or dotplot) with replicate medians
-- **B: Trajectories** â€” Per-replicate temporal trajectories with trend lines and SEM ribbons
-- **C: Effect sizes** â€” Percent change over time
-
-Select any combination of panels. Each panel is labeled (A, B, C) in bold at the upper-left corner following journal conventions. A global title and subtitle are added above the panel row.
-
-**Export options:**
-- **File format**: PDF (vector, recommended), PNG (raster), SVG (vector, editable), TIFF (LZW compressed), or EPS (legacy vector).
-- **Width/Height**: Customize in inches. Nature single-column = 3.5 in, double-column = 7.0 in, full page = 10 in.
-- **DPI**: 300 minimum for raster formats; 600 for line art.
-
-All five formats are available on every tab (Distributions, Trajectories, Effect Sizes, and Publication Figure). Format-specific handling includes LZW compression for TIFF (to keep file sizes manageable), cairo-based font embedding for EPS (for reliable text rendering), and svglite for SVG (if installed, for clean vector output compatible with Adobe Illustrator and Inkscape).
+Assembles up to nine panels (distributions, trajectories, effect sizes,
+morphospace, phenotypes, cell metrics, radar, morphological trajectory,
+diversity) into one lettered composite with a single shared legend. Export it as
+a figure, or as a **PowerPoint deck with one editable slide per panel**.
 
 ---
 
+### Editing figures
+
+**Double-click any figure** to open the editor and change:
+
+- title, subtitle, X and Y axis labels, legend title, caption
+- **condition names** and **timepoint labels** (for example "0 h", "Uninduced")
+
+Renaming applies everywhere at once - every figure, every statistics table,
+every export. Timepoint labels are display-only: the underlying numeric time is
+untouched, so ordering, trajectories and the trend test keep working. There is a
+one-click "replace underscores with spaces" button for cleaning up
+instrument-generated names.
+
+Every plot tab also has sidebar controls for fonts, sizes, per-element
+typography, legend position, gridlines, panel borders, point size and export
+dimensions - plus **Apply to all tabs** to propagate typography everywhere.
+
+### Exporting
+
+| Format | Use it for |
+|--------|-----------|
+| **PDF**, **SVG**, **EPS** | Vector figures for journals and for editing in Illustrator or Inkscape |
+| **PPTX (editable)** | PowerPoint where text and shapes stay editable (ungroup the graphic) |
+| **PNG**, **TIFF** | Raster; TIFF is LZW-compressed for journal submission |
+| **CSV / TXT** | Statistics tables, cell metrics, multi-feature results |
+| **RDS** | Session file to resume the analysis later |
+
+Set width, height and DPI per tab before exporting; what you see on screen is
+exactly what is written to the file.
+
+### Scripting your analysis
+
+The **Script** tab writes a ready-to-run R script that reproduces your current
+setup outside the app - same helper functions, same statistics, same theme.
+Choose your measurement, grouping, test and plot type, click **Generate script**,
+then copy it or download it as a `.R` file and run it with
+`Rscript my_analysis.R`. Use it to re-run an analysis when data is updated, to
+batch over many measurements, or to attach a reproducible script to a paper.
+
+`analysis_template.R` in this folder is the same starting point as a plain file.
 ## Python Script â€” User Guide
 
 ### Basic Usage
