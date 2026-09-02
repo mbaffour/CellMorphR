@@ -691,7 +691,7 @@ fit_lmm_safe <- function(df, measure, transform = "none") {
   transform_used <- transform
   if (transform == "log") {
     vals <- df[[measure]]
-    df[[measure]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals + 1) else log(vals)
+    df[[measure]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals - min(vals, na.rm = TRUE) + 1) else log(vals)
   } else if (transform == "sqrt") {
     df[[measure]] <- sqrt(pmax(df[[measure]], 0))
   }
@@ -3070,7 +3070,7 @@ server <- function(input, output, session) {
       tryCatch({
         if (transform == "log") {
           vals <- df[[m]]
-          df[[m]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals + 1) else log(vals)
+          df[[m]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals - min(vals, na.rm = TRUE) + 1) else log(vals)
         } else if (transform == "sqrt") {
           df[[m]] <- sqrt(pmax(df[[m]], 0))
         }
@@ -4296,6 +4296,8 @@ server <- function(input, output, session) {
     ylab <- switch(yvar, abs_diff = paste("Delta", mlbl), pct_change = paste("% Change in", mlbl), cohens_d = "Cohen's d")
     # Filter control if not requested
     esd_plot <- if (isTRUE(input$es_show_control)) esd else esd[!esd$is_control, , drop = FALSE]
+    validate(need(nrow(esd_plot) > 0 && any(!esd$is_control),
+      "Effect sizes need at least one condition besides the reference condition."))
     cols_es <- if (isTRUE(input$es_show_control)) cols else {
       ref <- input$ref_condition %||% names(cols)[1]
       cols[!names(cols) %in% ref]
@@ -4905,7 +4907,6 @@ server <- function(input, output, session) {
     ctype <- input$cm_chart_type %||% "violin"
     base_sz <- input$cm_base_size %||% 12
     legend_pos <- input$cm_legend_pos %||% "top"
-    show_grid <- isTRUE(input$cm_show_grid)
     grouping <- input$cm_grouping %||% "by_time"
     metric <- input$cm_metric %||% "mean_val"
     metric_label <- switch(metric,
