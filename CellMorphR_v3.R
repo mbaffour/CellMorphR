@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.1.1
+# Version 3.1.2
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.1.1.
+#   anti-pseudoreplication statistics. Version 3.1.2.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.1.1"
+APP_VERSION <- "3.1.2"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
