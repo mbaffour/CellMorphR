@@ -937,6 +937,10 @@ plot_radar <- function(radar_df, cols, base_sz = 12, show_points = TRUE,
   p
 }
 
+# ---- END OF STATISTICAL CORE (tests/helper-cellmorphr.R sources up to here) ----
+# Everything above this marker is plain R with no Shiny reactivity, so the test
+# suite can source it standalone. Keep new statistical helpers above the marker.
+
 # =============================================================================
 # SHARED FIGURE CONTROLS (reusable UI component)
 # =============================================================================
