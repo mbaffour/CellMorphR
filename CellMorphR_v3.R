@@ -2385,7 +2385,7 @@ ui <- page_navbar(
           choices = c("Median" = "median_val", "Mean" = "mean_val"), selected = "median_val"),
         radioButtons("es_type", "Metric",
           choices = c("Absolute difference" = "abs_diff", "Percent change" = "pct_change",
-                      "Cohen's d" = "cohens_d"), selected = "pct_change"),
+                      "Hedges' g (95% CI)" = "hedges_g"), selected = "pct_change"),
         tags$hr(),
         checkboxInput("es_show_control", "Show control trajectory (baseline)", FALSE),
         radioButtons("es_plot_style", "Plot style",
@@ -2406,7 +2406,7 @@ ui <- page_navbar(
           tags$h6("Understanding Effect Sizes"),
           tags$p("P-values show if an effect exists; effect sizes show ", tags$strong("how big"), "."),
           tags$p(tags$strong("Percent change"), " is most intuitive: 'Cells are 25% larger at 120 min.'"),
-          tags$p(tags$strong("Cohen's d"), " standardizes by variability. d > 0.8 = large effect.")
+          tags$p(tags$strong("Hedges' g"), " standardizes by variability: the difference in means divided by the pooled SD of the biological replicates, with Hedges' small-sample correction. Cohen's conventional benchmarks put |g| > 0.8 at \"large\", but with three dishes per group the 95% interval shown alongside each point is usually several units wide -- read the interval, not the point.")
         ))
       )
     )
@@ -4807,22 +4807,34 @@ server <- function(input, output, session) {
       cv <- rs[[yvar]][rs$Condition == ref & rs$Time_min == tm]
       lapply(conds, function(cd) {
         tv <- rs[[yvar]][rs$Condition == cd & rs$Time_min == tm]
-        cm <- mean(cv); tm2 <- mean(tv); ps <- sqrt((var(cv) + var(tv)) / 2)
-        data.frame(Time_min = tm, Condition = cd, ctrl_mean = cm, trt_mean = tm2,
-          abs_diff = tm2 - cm, pct_change = if (abs(cm) > 1e-10) (tm2 - cm) / cm * 100 else NA,
-          cohens_d = if (ps > 0) (tm2 - cm) / ps else NA, is_control = FALSE)
+        cm <- mean(cv); tm2 <- mean(tv)
+        # Hedges' g with a noncentral-t interval, and NA (never an error) when a
+        # condition is absent or has a single replicate at this timepoint.
+        g <- hedges_g(cv, tv)
+        data.frame(Time_min = tm, Condition = cd,
+          n_reps_ref = length(cv[is.finite(cv)]), n_reps_cond = length(tv[is.finite(tv)]),
+          ctrl_mean = cm, trt_mean = tm2,
+          abs_diff = tm2 - cm,
+          pct_change = if (isTRUE(abs(cm) > 1e-10)) (tm2 - cm) / cm * 100 else NA_real_,
+          hedges_g = g$g, hedges_g_low = g$ci_low, hedges_g_high = g$ci_high,
+          note = g$note %||% NA_character_, is_control = FALSE,
+          stringsAsFactors = FALSE)
       }) %>% bind_rows()
     }) %>% bind_rows()
     # Add control baseline rows (effect size = 0)
-    ctrl_rows <- data.frame(Time_min = times, Condition = ref, ctrl_mean = NA, trt_mean = NA,
-      abs_diff = 0, pct_change = 0, cohens_d = 0, is_control = TRUE)
+    ctrl_rows <- data.frame(Time_min = times, Condition = ref,
+      n_reps_ref = NA_integer_, n_reps_cond = NA_integer_, ctrl_mean = NA, trt_mean = NA,
+      abs_diff = 0, pct_change = 0, hedges_g = 0, hedges_g_low = NA_real_,
+      hedges_g_high = NA_real_, note = NA_character_, is_control = TRUE,
+      stringsAsFactors = FALSE)
     rbind(ctrl_rows, trt_rows)
   })
 
   es_plot_obj <- reactive({
     req(es_data(), input$es_type)
     esd <- es_data(); cols <- cond_colors(); yvar <- input$es_type; mlbl <- measure_label()
-    ylab <- switch(yvar, abs_diff = paste("Delta", mlbl), pct_change = paste("% Change in", mlbl), cohens_d = "Cohen's d")
+    ylab <- switch(yvar, abs_diff = paste("Delta", mlbl), pct_change = paste("% Change in", mlbl),
+                   hedges_g = "Hedges' g (95% CI)")
     # Filter control if not requested
     esd_plot <- if (isTRUE(input$es_show_control)) esd else esd[!esd$is_control, , drop = FALSE]
     validate(need(nrow(esd_plot) > 0 && any(!esd$is_control),
@@ -4852,7 +4864,26 @@ server <- function(input, output, session) {
       labs(x = "Time (min)", y = ylab, title = paste("Effect on", mlbl, "Over Time"),
            subtitle = if (isTRUE(input$es_show_control)) "Control shown as baseline (0)" else "Treatment vs control") +
       get_theme(input, "es")
-    if (yvar == "cohens_d") p <- p + geom_hline(yintercept = c(-0.8, 0.8), linetype = "dotted", color = "grey70")
+    if (yvar == "hedges_g") {
+      # The guides are Cohen's conventional benchmarks, not thresholds for this
+      # experiment; they are only honest next to an interval, so the interval is
+      # drawn with them (audit CM-3).
+      ci <- esd_plot[!esd_plot$is_control & is.finite(esd_plot$hedges_g_low), , drop = FALSE]
+      if (nrow(ci) > 0) p <- p + geom_errorbar(
+        data = ci, aes(x = Time_min, ymin = hedges_g_low, ymax = hedges_g_high, color = Condition),
+        width = 2, linewidth = 0.6, alpha = 0.8, inherit.aes = FALSE)
+      p <- p + geom_hline(yintercept = c(-0.8, 0.8), linetype = "dotted", color = "grey70") +
+        labs(caption = paste0("Hedges' g (small-sample corrected) with 95% noncentral-t intervals, ",
+                              "computed on biological replicate summaries. Dotted lines are Cohen's ",
+                              "conventional |0.8| benchmark, not a significance threshold."))
+    }
+    dropped <- esd[!esd$is_control & is.na(esd$hedges_g) & !is.na(esd$note), , drop = FALSE]
+    if (yvar == "hedges_g" && nrow(dropped) > 0) {
+      p <- p + labs(subtitle = paste0(
+        (if (isTRUE(input$es_show_control)) "Control shown as baseline (0)" else "Treatment vs control"),
+        ". Not estimable at ", nrow(dropped), " condition-timepoint combination",
+        if (nrow(dropped) == 1) "" else "s", " (fewer than 2 replicates); see the Table tab."))
+    }
     apply_custom_labs(p, input, "es")
   })
 
