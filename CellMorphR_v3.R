@@ -1001,19 +1001,49 @@ fit_lmm_safe <- function(df, measure, transform = "none") {
                                                    optCtrl = list(maxfun = 50000)))
     }, warning = function(w) { warn_msgs <<- c(warn_msgs, conditionMessage(w)); invokeRestart("muffleWarning") }),
     error = function(e) NULL)
-  is_singular <- if (!is.null(model)) tryCatch(isTRUE(lme4::isSingular(model)), error = function(e) FALSE) else FALSE
+
   if (is.null(model)) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = paste0("LMM failed. ", paste(warn_msgs, collapse = "; "), " Falling back to ANOVA."),
-                fallback_used = TRUE, transform_used = transform_used))
+    return(no_model(paste0("The mixed model did not converge",
+      if (length(warn_msgs)) paste0(" (", paste(unique(warn_msgs), collapse = "; "), ")") else "",
+      ". No global model was fitted -- the Pairwise results above are still valid.")))
   }
+
+  notes <- character(0)
+  if (!can_fit_reptime) notes <- c(notes, paste0(
+    "Only one timepoint, or only one cell per dish per timepoint: the dish x timepoint ",
+    "random term is not estimable and was dropped. Time and Condition:Time are NOT ",
+    "protected against pseudoreplication in this fit -- prefer the repeated-measures ANOVA."))
+
+  # A singular fit means a variance component was estimated at exactly zero. That
+  # is reported, not silently swapped for another model: the fit is still usable
+  # (its tests become conservative) and the user needs to know which term
+  # collapsed. Up to v3.1.2 this branch returned NULL while promising a fallback
+  # ANOVA that was never computed (audit CM-7).
+  is_singular <- tryCatch(isTRUE(lme4::isSingular(model)), error = function(e) FALSE)
   if (is_singular) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = "Singular fit (replicate variance ~ 0). Falling back to ANOVA.",
-                fallback_used = TRUE, transform_used = transform_used))
+    vc <- tryCatch(as.data.frame(lme4::VarCorr(model)), error = function(e) NULL)
+    zero_terms <- if (!is.null(vc)) vc$grp[!is.na(vc$vcov) & vc$vcov < 1e-10] else character(0)
+    notes <- c(notes, paste0(
+      "Singular fit: ",
+      if (length(zero_terms)) paste0("the random term(s) ", paste(zero_terms, collapse = ", "),
+                                     " were estimated at zero variance. ")
+      else "at least one random-effect variance was estimated at zero. ",
+      "The model below is still reported, and its tests are conservative rather than wrong, ",
+      "but with this few replicates the variance components are barely identified. ",
+      "Treat the repeated-measures ANOVA on replicate summaries as the primary global model."))
   }
-  list(model = model, method = "Linear Mixed Model (cell-level, replicate as random effect)",
-       warnings = warn_msgs, fallback_used = FALSE, transform_used = transform_used, data_used = df)
+  if (!has_lmerTest) notes <- c(notes,
+    "lmerTest is not installed, so the mixed-model table has no p-value column. Install lmerTest for Satterthwaite degrees of freedom.")
+
+  list(model = model, method = LMM_LABEL,
+       formula = formula_lmm,
+       random_structure = rand,
+       has_reptime_term = can_fit_reptime,
+       warnings = c(warn_msgs, notes), notes = notes,
+       fallback_used = FALSE, fitted = TRUE, singular = is_singular,
+       df_method = if (has_lmerTest) "Satterthwaite (lmerTest)" else "none (lmerTest not installed)",
+       transform_used = tr$transform, transform_label = tr$label, transform_shift = tr$shift,
+       data_used = df)
 }
 
 # =============================================================================
@@ -1058,19 +1088,165 @@ find_optimal_k <- function(data_matrix, max_k = 10) {
 # MULTI-FEATURE ANALYSIS HELPERS
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Repeated-measures ANOVA on replicate-level summaries.
+#
+# In a time course the SAME dish is imaged at every timepoint, so a dish is one
+# experimental unit, not k of them. Up to v3.1.2 this function fitted a plain
+# `aov(y ~ Condition * Time_fac)` on the replicate summaries, which counted each
+# dish once per timepoint and gave a measured 41% false-positive rate for the
+# Condition effect on null data (audit CM-1).
+#
+# The model below puts the dish in its own error stratum, so each term is tested
+# against the variation it actually varies over:
+#   * Condition varies BETWEEN dishes -> tested on dish-to-dish variation
+#     (Error: Rep_unique), df = n_dishes - n_conditions
+#   * Time and Condition:Time vary WITHIN a dish -> tested on the dish x time
+#     variation (Error: Within), never on the cell-to-cell residual
+#
+# Note there is exactly one summary value per (dish, timepoint), so the within
+# stratum residual IS the dish x time interaction. Nesting time explicitly --
+# Error(Rep_unique/Time_fac) -- would leave that stratum with zero residual df
+# and no p-values at all, which is why Error(Rep_unique) is used.
+# -----------------------------------------------------------------------------
+
+RM_ANOVA_LABEL <- "Repeated-measures ANOVA on replicate summaries (dish as error stratum)"
+
+fit_rm_anova <- function(rs, yvar = "median_val") {
+  if (is.null(rs) || nrow(rs) == 0 || !yvar %in% names(rs)) {
+    return(list(ok = FALSE, msg = "No replicate-level summaries available."))
+  }
+  if (!all(c("Condition", "Replicate") %in% names(rs))) {
+    return(list(ok = FALSE, msg = "The global model needs Condition and Replicate columns."))
+  }
+  rs <- rs[!is.na(rs[[yvar]]), , drop = FALSE]
+  rs$Condition  <- droplevels(factor(rs$Condition))
+  rs$Replicate  <- factor(rs$Replicate)
+  rs$Rep_unique <- droplevels(interaction(rs$Condition, rs$Replicate, drop = TRUE))
+  has_time <- "Time_min" %in% names(rs)
+  rs$Time_fac <- if (has_time) droplevels(factor(rs$Time_min)) else factor(rep("all", nrow(rs)))
+
+  n_cond <- nlevels(rs$Condition)
+  n_time <- nlevels(rs$Time_fac)
+  n_dish <- nlevels(rs$Rep_unique)
+  if (n_cond < 2) return(list(ok = FALSE, msg = "Need at least two conditions for a global model."))
+  if (n_dish <= n_cond) {
+    return(list(ok = FALSE, msg = paste0(
+      "Only ", n_dish, " biological replicates across ", n_cond,
+      " conditions: there is no dish-to-dish variation left to test Condition against. ",
+      "A global model needs at least two replicates in at least one condition.")))
+  }
+
+  repeated <- n_time > 1
+  form <- if (repeated) {
+    as.formula(paste0(yvar, " ~ Condition * Time_fac + Error(Rep_unique)"))
+  } else {
+    # One timepoint: the design collapses to a one-way ANOVA over dishes, which
+    # already has the dish as its unit. No error stratum is needed or estimable.
+    as.formula(paste0(yvar, " ~ Condition"))
+  }
+  model <- tryCatch(aov(form, data = rs), error = function(e) NULL)
+  if (is.null(model)) return(list(ok = FALSE, msg = "The global model could not be fitted."))
+
+  tbl <- tidy_rm_anova(model)
+  if (is.null(tbl) || nrow(tbl) == 0) {
+    return(list(ok = FALSE, msg = "The global model produced no testable terms."))
+  }
+  notes <- character(0)
+  if (!repeated) notes <- c(notes,
+    "Only one timepoint: fitted as a one-way ANOVA on replicate summaries (no Time term).")
+  if (any(is.na(tbl$p))) notes <- c(notes,
+    "Some terms have no residual degrees of freedom left and cannot be tested; add replicates or timepoints.")
+
+  list(ok = TRUE, model = model, table = tbl, data = rs,
+       method = if (repeated) RM_ANOVA_LABEL else
+         "One-way ANOVA on replicate summaries (one timepoint; dish is the unit)",
+       repeated = repeated, n_dishes = n_dish, n_conditions = n_cond, n_times = n_time,
+       notes = notes, yvar = yvar)
+}
+
+#' Flatten an aov / aovlist summary into one tidy table, recording which error
+#' stratum -- and therefore which denominator df -- tested each term.
+tidy_rm_anova <- function(model) {
+  s <- summary(model)
+  strata <- if (inherits(model, "aovlist")) s else list("Error: Within" = s)
+  out <- lapply(names(strata), function(nm) {
+    tab <- strata[[nm]]
+    if (is.list(tab) && !is.data.frame(tab)) tab <- tab[[1]]
+    if (is.null(tab)) return(NULL)
+    terms <- trimws(rownames(tab))
+    ss <- tab[["Sum Sq"]]
+    resid_i <- which(terms == "Residuals")
+    ss_resid <- if (length(resid_i) == 1) ss[resid_i] else NA_real_
+    df_resid <- if (length(resid_i) == 1) tab[["Df"]][resid_i] else NA_real_
+    keep <- setdiff(seq_along(terms), resid_i)
+    if (length(keep) == 0) return(NULL)
+    data.frame(
+      Term = terms[keep],
+      Error_Stratum = sub("^Error: ", "", nm),
+      Df = tab[["Df"]][keep],
+      DenDF = df_resid,
+      Sum_Sq = ss[keep],
+      Mean_Sq = tab[["Mean Sq"]][keep],
+      F_value = tab[["F value"]][keep],
+      p = tab[["Pr(>F)"]][keep],
+      partial_eta2 = if (is.na(ss_resid)) NA_real_ else ss[keep] / (ss[keep] + ss_resid),
+      stringsAsFactors = FALSE
+    )
+  })
+  out <- do.call(rbind, out[!vapply(out, is.null, logical(1))])
+  if (is.null(out)) return(NULL)
+  rownames(out) <- NULL
+  out
+}
+
+#' Human-readable print of a fit_rm_anova() result, used by the Statistics tab
+#' and the downloaded report.
+format_rm_anova <- function(fit, digits = 4) {
+  if (is.null(fit) || !isTRUE(fit$ok)) {
+    return(paste("No global model:", fit$msg %||% "not available."))
+  }
+  tb <- fit$table
+  df <- data.frame(
+    Term = tb$Term,
+    `Tested against` = tb$Error_Stratum,
+    Df = tb$Df, DenDF = tb$DenDF,
+    `Sum Sq` = signif(tb$Sum_Sq, digits), `Mean Sq` = signif(tb$Mean_Sq, digits),
+    `F` = signif(tb$F_value, digits),
+    `p` = format_p_value(tb$p),
+    `partial eta2` = round(tb$partial_eta2, 3),
+    check.names = FALSE, stringsAsFactors = FALSE
+  )
+  lines <- c(
+    fit$method,
+    paste0("Unit of replication: biological replicate (", fit$n_dishes,
+           " replicate groups across ", fit$n_conditions, " conditions",
+           if (fit$repeated) paste0(", ", fit$n_times, " timepoints") else "", ")"),
+    paste(capture.output(print(df, row.names = FALSE)), collapse = "\n")
+  )
+  if (length(fit$notes) > 0) lines <- c(lines, paste("Note:", fit$notes))
+  paste(lines, collapse = "\n")
+}
+
 run_anova_for_feature <- function(df, measure, yvar = "median_val") {
   rs <- compute_replicate_summaries(df, measure)
-  rs$Time_fac <- factor(rs$Time_min)
-  formula_str <- paste0(yvar, " ~ Condition * Time_fac")
-  model <- tryCatch(aov(as.formula(formula_str), data = rs), error = function(e) NULL)
-  if (is.null(model)) return(NULL)
-  s <- summary(model)[[1]]; p_vals <- s[["Pr(>F)"]]; ss_vals <- s[["Sum Sq"]]
-  ss_resid <- ss_vals[length(ss_vals)]
-  eta2 <- ss_vals[-length(ss_vals)] / (ss_vals[-length(ss_vals)] + ss_resid)
-  data.frame(Feature = measure, Condition_p = p_vals[1], Time_p = p_vals[2],
-    Interaction_p = if (length(p_vals) >= 3) p_vals[3] else NA,
-    Condition_eta2 = round(eta2[1], 4), Time_eta2 = round(eta2[2], 4),
-    Interaction_eta2 = if (length(eta2) >= 3) round(eta2[3], 4) else NA, stringsAsFactors = FALSE)
+  fit <- fit_rm_anova(rs, yvar = yvar)
+  if (!isTRUE(fit$ok)) return(NULL)
+  tb <- fit$table
+  pick <- function(term, col) {
+    i <- match(term, tb$Term)
+    if (is.na(i)) NA_real_ else tb[[col]][i]
+  }
+  data.frame(
+    Feature = measure,
+    Condition_p = pick("Condition", "p"),
+    Time_p = pick("Time_fac", "p"),
+    Interaction_p = pick("Condition:Time_fac", "p"),
+    Condition_partial_eta2 = round(pick("Condition", "partial_eta2"), 4),
+    Time_partial_eta2 = round(pick("Time_fac", "partial_eta2"), 4),
+    Interaction_partial_eta2 = round(pick("Condition:Time_fac", "partial_eta2"), 4),
+    stringsAsFactors = FALSE
+  )
 }
 
 detect_earliest_divergence <- function(df, measure, ref_cond, alpha = 0.05) {
