@@ -511,7 +511,28 @@ compute_flexible_replicate_summary <- function(df, measure, group_cols, yvar = "
   out
 }
 
-build_comparison_table <- function(rep_df, mode = "vs_reference", reference_group = NULL) {
+# The stratified modes need their stratum column to be one of the grouping
+# columns. Up to v3.1.2 a request for "within each time point" with Time_min
+# unchecked fell through to vs_reference against an arbitrary first group, while
+# the report still printed the mode the user asked for (audit CM-9). The mode
+# actually built is now returned on the table as the "realised_mode" attribute,
+# together with a "mode_message" explaining any downgrade, and the callers
+# report that rather than the request.
+build_comparison_table <- function(rep_df, mode = "vs_reference", reference_group = NULL,
+                                   strict = FALSE) {
+  requested_mode <- mode
+  mode_message <- NULL
+  needs <- c(within_time = "Time_min", within_condition = "Condition")[mode]
+  if (!is.na(needs) && !needs %in% names(rep_df)) {
+    msg <- paste0("Comparison mode \"", mode, "\" needs ", needs,
+                  " to be one of the grouping columns, but the statistical groups are built from ",
+                  paste(setdiff(names(rep_df), c("Statistics_Group", "Replicate", "Stat_Value",
+                                                 "median_val", "mean_val", "sd_val", "iqr_val",
+                                                 "n_cells")), collapse = " + "), ".")
+    if (strict) stop(msg, call. = FALSE)
+    mode <- "vs_reference"
+    mode_message <- paste(msg, "Fell back to comparing every group against the reference.")
+  }
   groups <- sort(unique(as.character(rep_df$Statistics_Group)))
   if (length(groups) < 2) return(data.frame())
 
@@ -547,7 +568,16 @@ build_comparison_table <- function(rep_df, mode = "vs_reference", reference_grou
   if (is.null(pair_df) || nrow(pair_df) == 0) return(data.frame())
   pair_df <- unique(pair_df)
   pair_df$Comparison_ID <- seq_len(nrow(pair_df))
-  pair_df[, c("Comparison_ID", "Stratum", "Group_1", "Group_2")]
+  out <- pair_df[, c("Comparison_ID", "Stratum", "Group_1", "Group_2")]
+  attr(out, "requested_mode") <- requested_mode
+  attr(out, "realised_mode")  <- mode
+  attr(out, "mode_message")   <- mode_message
+  out
+}
+
+#' The comparison mode actually built, for reports. Never echoes the request.
+realised_comparison_mode <- function(comparison_tbl, fallback = NA_character_) {
+  attr(comparison_tbl, "realised_mode") %||% fallback
 }
 
 run_pairwise_tests <- function(rep_df, comparison_tbl, yvar = "Stat_Value",
