@@ -440,8 +440,11 @@ compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
       }
     }
   }
+  n_family <- nrow(sig_annot)
   if (nrow(sig_annot) > 0) {
     corr <- if (is.null(correction) || correction == "none") "none" else correction
+    # The family is every condition-within-timepoint comparison drawn on this
+    # figure, adjusted together and BEFORE the display truncation below.
     sig_annot$p_adj <- if (corr == "none") sig_annot$p_raw else p.adjust(sig_annot$p_raw, method = corr)
     sig_annot$stars <- ifelse(sig_annot$p_adj < 0.001, "***",
                          ifelse(sig_annot$p_adj < 0.01, "**",
@@ -478,7 +481,10 @@ compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
     "holm" = "Holm", "BH" = "Benjamini-Hochberg", "bonferroni" = "Bonferroni", "none" = "uncorrected", correction)
   unit_label <- if (sig_yvar == "mean_val") "replicate means" else "replicate medians"
   caption <- paste0(test_name, " on ", unit_label,
-    if (corr_name == "uncorrected") ", uncorrected" else paste0(", ", corr_name, "-corrected"),
+    if (corr_name == "uncorrected") ", uncorrected"
+    else paste0(", ", corr_name, "-corrected across all ", n_family,
+                " condition-within-timepoint comparison", if (n_family == 1) "" else "s",
+                " (one family)"),
     ". * p<0.05, ** p<0.01, *** p<0.001.")
   warn <- character(0)
   if (wilcox_impossible) warn <- c(warn,
@@ -2285,7 +2291,7 @@ ui <- page_navbar(
           choices = c("Each group vs selected reference" = "vs_reference",
                       "All pairwise groups" = "all_pairwise",
                       "Pairwise within each time point" = "within_time",
-                      "Pairwise within each condition" = "within_condition"), selected = "vs_reference"),
+                      "Pairwise within each condition" = "within_condition"), selected = "within_time"),
         uiOutput("stat_reference_ui"),
         selectInput("stat_test", "Pairwise test",
           choices = c("Welch's t-test" = "welch", "Wilcoxon rank-sum" = "wilcox"), selected = "welch"),
@@ -4168,8 +4174,9 @@ server <- function(input, output, session) {
     }
 
     # --- Significance brackets ---
-    # Test + correction follow the Statistics tab settings (single source of
-    # truth), so on-figure stars always agree with the Pairwise table.
+    # Test + correction follow the Statistics tab settings. The family does too,
+    # but only when that tab is left on its default within-time configuration --
+    # bracket_family_note() states it in the caption when it is not.
     sig_ymax <- NA_real_
     bracket_types <- c("violin", "strip", "sina", "boxstrip", "dotplot")
     if (isTRUE(input$show_sig) && !sample_x_mode && input$dist_type %in% bracket_types && length(unique(df$Condition)) >= 2) {
@@ -4247,7 +4254,7 @@ server <- function(input, output, session) {
           label_extra <- if (input$sig_label_style == "stars_p") 0.20 else 0.12
           sig_ymax <- max(bracket_base) + y_range * label_extra
         }
-        p <- p + labs(caption = sig_res$caption)
+        p <- p + labs(caption = paste0(sig_res$caption, bracket_family_note() %||% ""))
       }
     }
 
@@ -4359,6 +4366,26 @@ server <- function(input, output, session) {
   output$dl_dist <- downloadHandler(
     filename = function() paste0("distributions_", input$measure, ".", fmt_ext(input$dist_format)),
     content  = function(file) save_figure(file, dist_plot_obj(), input$dist_width, input$dist_height, input$dist_dpi, input$dist_format))
+
+  # --- Keep the figure brackets and the Statistics table in one family --------
+  # The brackets always compare conditions WITHIN each timepoint, on replicate
+  # summaries, with the Statistics tab's test and correction. The Statistics tab
+  # builds its own family from the grouping columns and comparison mode, so the
+  # two agree only when it is set to "Pairwise within each time point" over
+  # Condition + Time_min -- which is now the shipped default. When it is set to
+  # anything else the caption says so, rather than leaving the reader to assume
+  # a bracket and a table row with different p-values are the same contrast
+  # (audit CM-6; the README used to claim the two "can never disagree").
+  bracket_family_note <- function() {
+    mode <- input$stat_compare_mode %||% "within_time"
+    cols <- input$stat_group_cols %||% c("Condition", "Time_min")
+    matches <- identical(mode, "within_time") && all(c("Condition", "Time_min") %in% cols)
+    if (matches) return(NULL)
+    paste0(" The Statistics tab is currently set to \"", mode, "\" over ",
+           paste(cols, collapse = " + "),
+           ", which is a different family of comparisons: its adjusted p-values will not match these brackets. ",
+           "Set it to \"Pairwise within each time point\" on Condition + Time_min for the two to agree.")
+  }
 
   # === TRAJECTORY TAB ===
   traj_plot_obj <- reactive({
@@ -5741,7 +5768,7 @@ server <- function(input, output, session) {
             label_extra <- if ((input$cm_sig_label %||% "stars") == "stars_p") 0.20 else 0.12
             max_bracket <- max(bracket_base) + y_range * label_extra
             p <- p + coord_cartesian(ylim = c(NA, max_bracket), clip = "off")
-            p <- p + labs(caption = sig_res$caption)
+            p <- p + labs(caption = paste0(sig_res$caption, bracket_family_note() %||% ""))
           }
         }
       }
