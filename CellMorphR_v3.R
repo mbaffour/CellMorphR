@@ -871,7 +871,7 @@ suggest_statistical_workflow <- function(rep_df, comparison_tbl = NULL, comparis
     "Raw single-cell values should be visualized, but p-values should be based on biological replicate summaries to avoid pseudoreplication.",
     paste0("Recommended p-value correction: ", ifelse(suggested_correction == "none", "none, because only one comparison is planned", suggested_correction), "."),
     paste0("Optional global model suggestion: ", switch(suggested_global,
-      anova = "two-way ANOVA, because Condition and Time_min appear available with multiple levels",
+      anova = "repeated-measures ANOVA with the dish as the error stratum, because Condition and Time_min appear available with multiple levels",
       lmm = "linear mixed model, because replicate IDs appear across time and a time-course structure may be present",
       skip = "skip global model unless you have a specific factorial question"), ".")
   )
@@ -2298,13 +2298,14 @@ ui <- page_navbar(
         tags$details(
           tags$summary(tags$strong("Optional global model"), style = "cursor:pointer;"),
           radioButtons("stat_method", "Global model",
-            choices = c("Two-way ANOVA if Condition + Time_min are available" = "anova",
-                        "Linear Mixed Model" = "lmm",
+            choices = c("Repeated-measures ANOVA (dish as error stratum)" = "anova",
+                        "Linear mixed model on cells" = "lmm",
                         "Skip global model" = "skip"), selected = "anova"),
-          conditionalPanel("input.stat_method == 'lmm'",
-            selectInput("stat_transform", "Data Transform (LMM)",
-              choices = c("None" = "none", "Log" = "log", "Sqrt" = "sqrt"), selected = "none"),
-            tags$p(class = "small text-muted", "LMM is attempted only when replicate structure supports it."))
+          tags$p(class = "small text-muted",
+            "Both models treat one dish measured at k timepoints as one experimental unit. ",
+            "The repeated-measures ANOVA runs on the replicate summaries; the mixed model runs on cells, ",
+            "with a random effect per dish and per dish-and-timepoint. Both use the Data tab's transform, ",
+            "the same one the pairwise tests use.")
         ),
         tags$hr(),
         actionButton("run_stats", "Run Flexible Statistics", class = "btn-primary w-100", icon = icon("play")),
@@ -2432,7 +2433,7 @@ ui <- page_navbar(
         uiOutput("mf_feature_selector"),
         tags$hr(),
         actionButton("run_multifeature", "Run All Features", class = "btn-primary w-100", icon = icon("play")),
-        tags$p(class = "small text-muted mt-2", "Two-way ANOVA across all features simultaneously."),
+        tags$p(class = "small text-muted mt-2", "Repeated-measures ANOVA (dish as error stratum) across all features simultaneously."),
         tags$hr(),
         tags$p(tags$strong("Raw Heatmap Settings"), class = "mb-1"),
         radioButtons("mf_raw_stat", "Statistic",
@@ -3344,7 +3345,7 @@ server <- function(input, output, session) {
   comparison_preview <- reactive({
     req(flexible_rep_summ())
     ref <- input$stat_reference_group
-    build_comparison_table(flexible_rep_summ(), input$stat_compare_mode %||% "vs_reference", ref)
+    build_comparison_table(flexible_rep_summ(), input$stat_compare_mode %||% "within_time", ref)
   })
 
   output$stat_reference_ui <- renderUI({
@@ -3352,7 +3353,7 @@ server <- function(input, output, session) {
     groups <- sort(unique(as.character(flexible_rep_summ()$Statistics_Group)))
     idx <- grep("uninf|control|wt|mock|empty|vector|0nm|0 nM|0_nM", groups, ignore.case = TRUE)
     default <- if (length(idx) > 0) groups[idx[1]] else groups[1]
-    if ((input$stat_compare_mode %||% "vs_reference") == "all_pairwise") {
+    if ((input$stat_compare_mode %||% "within_time") == "all_pairwise") {
       tags$p(class = "small text-muted", "Reference group is not used for all-pairwise mode.")
     } else {
       selectInput("stat_reference_group", "Reference group", choices = groups, selected = default)
@@ -3385,7 +3386,7 @@ server <- function(input, output, session) {
     suggestion <- suggest_statistical_workflow(
       rep_df = flexible_rep_summ(),
       comparison_tbl = comparison_preview(),
-      comparison_mode = input$stat_compare_mode %||% "vs_reference",
+      comparison_mode = input$stat_compare_mode %||% "within_time",
       stat_unit = input$stat_summary %||% "median_val",
       selected_group_cols = input$stat_group_cols
     )
@@ -3403,7 +3404,7 @@ server <- function(input, output, session) {
     suggest_statistical_workflow(
       rep_df = flexible_rep_summ(),
       comparison_tbl = comparison_preview(),
-      comparison_mode = input$stat_compare_mode %||% "vs_reference",
+      comparison_mode = input$stat_compare_mode %||% "within_time",
       stat_unit = input$stat_summary %||% "median_val",
       selected_group_cols = input$stat_group_cols
     )
@@ -3520,19 +3521,9 @@ server <- function(input, output, session) {
     mc <- tryCatch(measure_cols(), error = function(e) NULL)
     if (is.null(mc) || length(mc) == 0) return(df)
     transform <- input$data_transform %||% "none"
-    if (transform == "none") return(df)
-    for (m in mc) {
-      if (!m %in% names(df)) next
-      tryCatch({
-        if (transform == "log") {
-          vals <- df[[m]]
-          df[[m]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals - min(vals, na.rm = TRUE) + 1) else log(vals)
-        } else if (transform == "sqrt") {
-          df[[m]] <- sqrt(pmax(df[[m]], 0))
-        }
-      }, error = function(e) NULL)
-    }
-    df
+    # One pipeline for every analysis in the app, and it records the transform
+    # (including the log shift) so the reports can state it -- see CM-13/CM-14.
+    apply_transform_to_columns(df, mc, transform)
   })
 
   measure_label <- reactive({
@@ -4421,8 +4412,17 @@ server <- function(input, output, session) {
     results$method <- paste0("Flexible pairwise statistics on biological replicate-level ",
                              ifelse(yvar == "median_val", "medians", "means"))
     results$measurement <- m
-    results$comparison_mode <- input$stat_compare_mode %||% "vs_reference"
+    results$comparison_mode_requested <- input$stat_compare_mode %||% "within_time"
+    # Report the mode that was actually built, never the one that was asked for.
+    results$comparison_mode <- realised_comparison_mode(comparison_preview(),
+                                                       results$comparison_mode_requested)
+    results$comparison_mode_message <- attr(comparison_preview(), "mode_message")
+    if (!is.null(results$comparison_mode_message)) {
+      showNotification(results$comparison_mode_message, type = "warning", duration = 12)
+    }
     results$reference_group <- input$stat_reference_group %||% NA_character_
+    results$transform_used  <- input$data_transform %||% "none"
+    results$transform_label <- describe_transform(transformed_data(), m, input$data_transform)
     results$statistical_unit <- ifelse(yvar == "median_val", "replicate median", "replicate mean")
     results$grouping_variables <- paste(input$stat_group_cols %||% "Condition", collapse = ", ")
     results$p_adjust <- input$stat_p_adjust %||% "holm"
@@ -4457,53 +4457,111 @@ server <- function(input, output, session) {
       correction = input$stat_p_adjust %||% "holm",
       reference_group = input$stat_reference_group %||% NA_character_,
       measurement = m,
-      comparison_mode = input$stat_compare_mode %||% "vs_reference",
+      comparison_mode = results$comparison_mode,
       stat_unit = results$statistical_unit
     )
     results$pairwise <- pw
     results$comparison_preview <- comp_tbl
     results$replicate_summary <- rs_flex
+    results$pairwise_family_size <- nrow(pw)
+    results$pairwise_family <- paste0(
+      "Holm-type correction applied across all ", nrow(pw), " comparison",
+      if (nrow(pw) == 1) "" else "s", " in this table (one family), using \"",
+      results$p_adjust, "\".")
+    # Advisory only -- see format_assumption_diagnostics().
+    results$diagnostics <- tryCatch(assumption_diagnostics(rs_flex, yvar = "Stat_Value"),
+                                    error = function(e) NULL)
 
-    # Optional legacy global model for simple Condition x Time_min workflows.
-    if ((input$stat_method %||% "anova") == "anova" && all(c("Condition", "Time_min") %in% names(rs_flex))) {
-      rs_global <- rs_flex
-      rs_global$Condition <- factor(rs_global$Condition)
-      rs_global$Time_fac <- factor(rs_global$Time_min)
-      model <- tryCatch(aov(as.formula(paste0(yvar, " ~ Condition * Time_fac")), data = rs_global), error = function(e) NULL)
-      if (!is.null(model)) {
-        anova_tbl <- summary(model)
-        results$anova_summary <- anova_tbl
-        results$model <- model
-        ss <- anova_tbl[[1]][["Sum Sq"]]
-        if (length(ss) > 1) {
-          ss_r <- ss[length(ss)]
-          eta2 <- ss[-length(ss)] / (ss[-length(ss)] + ss_r)
-          results$partial_eta2 <- data.frame(Source = rownames(anova_tbl[[1]])[-length(ss)], partial_eta2 = round(eta2, 3))
-        }
-        results$shapiro <- tryCatch(shapiro.test(residuals(model)), error = function(e) NULL)
-      }
-    } else if ((input$stat_method %||% "skip") == "lmm") {
-      if (!has_lme4) {
-        showNotification("lme4 required for LMM. Flexible pairwise results were still generated.", type = "warning")
+    # --- Optional global model -------------------------------------------------
+    # Both branches now test each term against the error stratum it belongs to;
+    # see fit_rm_anova() and fit_lmm_safe(). Both run on transformed_data(), the
+    # same scale as the pairwise tests above, so one report never mixes scales.
+    gm <- input$stat_method %||% "anova"
+    if (gm == "anova" && all(c("Condition", "Time_min") %in% names(rs_flex))) {
+      fit <- fit_rm_anova(rs_flex, yvar = yvar)
+      results$global_model <- fit
+      results$global_model_kind <- "rm_anova"
+      if (isTRUE(fit$ok)) {
+        results$model <- fit$model
+        results$anova_text <- format_rm_anova(fit)
+        results$partial_eta2 <- data.frame(
+          Source = fit$table$Term,
+          `Tested against` = fit$table$Error_Stratum,
+          partial_eta2 = round(fit$table$partial_eta2, 3),
+          check.names = FALSE)
+        # Residuals of the equivalent fixed-effects fit, for the normality check.
+        resid_fit <- tryCatch(residuals(lm(as.formula(paste0(yvar, " ~ Condition * Time_fac + Rep_unique")),
+                                           data = fit$data)), error = function(e) NULL)
+        results$diagnostics <- tryCatch(assumption_diagnostics(rs_flex, yvar = "Stat_Value",
+                                                               residuals = resid_fit),
+                                        error = function(e) results$diagnostics)
       } else {
-        req(plot_data(), m)
-        df_lmm <- plot_data()
-        lmm_result <- fit_lmm_safe(df_lmm, m, transform = input$stat_transform %||% "none")
+        results$global_model_message <- fit$msg
+      }
+    } else if (gm == "anova") {
+      results$global_model_kind <- "rm_anova"
+      results$global_model_message <- paste0(
+        "The repeated-measures ANOVA needs Condition and Time_min among the grouping ",
+        "columns. Your groups are built from ", results$grouping_variables,
+        ", so no global model was fitted. The pairwise results above are unaffected.")
+    } else if (gm == "lmm") {
+      results$global_model_kind <- "lmm"
+      if (!has_lme4) {
+        showNotification("lme4 is required for the mixed model. The pairwise results were still generated.",
+                         type = "warning")
+        results$global_model_message <- "lme4 is not installed, so no mixed model was fitted."
+      } else {
+        # CM-14: the mixed model reads the SAME frame the pairwise tests read, so
+        # one report can no longer hold pairwise tests on log data and a model on
+        # raw data. The Data-tab transform is the only transform.
+        req(transformed_data(), m)
+        lmm_result <- fit_lmm_safe(transformed_data(), m, transform = "none")
+        results$lmm <- lmm_result
         results$lmm_warnings <- lmm_result$warnings
-        results$transform_used <- lmm_result$transform_used
-        results$method <- paste(results$method, "+ optional LMM/global model")
-        if (!is.null(lmm_result$model)) {
+        results$method <- paste(results$method, "+ mixed model")
+        if (isTRUE(lmm_result$fitted)) {
           results$model <- lmm_result$model
           results$anova_summary <- tryCatch(anova(lmm_result$model), error = function(e) NULL)
+          results$lmm_formula <- paste(deparse(lmm_result$formula), collapse = " ")
+          results$lmm_df_method <- lmm_result$df_method
           results$ranef_var <- tryCatch(as.data.frame(lme4::VarCorr(lmm_result$model)), error = function(e) NULL)
           if (has_emmeans) {
-            emm <- tryCatch(emmeans::emmeans(lmm_result$model, ~ Condition | Time_fac), error = function(e) NULL)
+            # CM-8: `~ Condition | Time_fac` makes Time_fac a `by` variable, so
+            # adjust="holm" corrected WITHIN each timepoint -- with two
+            # conditions that is one contrast per stratum and no correction at
+            # all, while the output was labelled "holm". Cross the factors so the
+            # family is every Condition-within-Time contrast, which is the family
+            # the documentation has always claimed.
+            emm <- tryCatch(emmeans::emmeans(lmm_result$model, ~ Condition * Time_fac),
+                            error = function(e) NULL)
             if (!is.null(emm)) {
               results$emmeans <- emm
-              results$pairwise_emm <- tryCatch(pairs(emm, adjust = "holm"), error = function(e) NULL)
+              # Pull the contrasts unadjusted and apply the correction here, over
+              # the whole table, so the family is unambiguous and matches the
+              # correction the user chose for the pairwise tests. emmeans' own
+              # `adjust=` is applied per `by` group, which is what produced the
+              # "holm" label on uncorrected p-values before.
+              cons <- tryCatch(as.data.frame(emmeans::contrast(
+                        emm, method = "pairwise", simple = "Condition",
+                        combine = TRUE, adjust = "none")),
+                        error = function(e) NULL)
+              if (!is.null(cons) && "p.value" %in% names(cons)) {
+                corr <- results$p_adjust
+                cons$p_raw <- cons$p.value
+                cons$p_adj <- if (is.null(corr) || corr == "none") cons$p_raw
+                              else p.adjust(cons$p_raw, method = corr)
+                cons$p.value <- NULL
+                cons$Significance <- make_significance_label(cons$p_adj)
+                results$emm_family <- paste0(
+                  "Condition contrasts at every timepoint, corrected as one family of ",
+                  nrow(cons), " (\"", corr, "\"), on Kenward-Roger degrees of freedom.")
+              }
+              results$pairwise_emm <- cons
               results$emm_summary <- tryCatch(as.data.frame(summary(emm)), error = function(e) NULL)
             }
           }
+        } else {
+          results$global_model_message <- paste(lmm_result$warnings, collapse = " ")
         }
       }
     }
@@ -4512,33 +4570,64 @@ server <- function(input, output, session) {
     showNotification("Flexible statistics complete. Pairwise tests used biological replicate summaries, not raw cells.", type = "message")
   })
 
-  output$stat_output <- renderPrint({
-    req(stat_results()); r <- stat_results()
+  # One report body, printed on screen and written to the downloaded .txt, so the
+  # two cannot drift apart.
+  print_stat_report <- function(r, include_tables = FALSE) {
     cat("=== METHOD ===\n", r$method, "\n\n")
     cat("Measurement:", r$measurement %||% input$stat_measure %||% input$measure, "\n")
+    cat("Transform:", r$transform_label %||% "none (raw values)", "\n")
     cat("Grouping variables:", r$grouping_variables %||% "Condition", "\n")
     cat("Comparison mode:", r$comparison_mode %||% NA, "\n")
+    if (!is.null(r$comparison_mode_message)) {
+      cat("  NOTE:", r$comparison_mode_message, "\n")
+    }
     cat("Reference group:", r$reference_group %||% NA, "\n")
     cat("Statistical unit:", r$statistical_unit %||% r$yvar_used, "\n")
     cat("Pairwise test:", r$test %||% NA, "\n")
-    cat("P-value correction:", r$p_adjust %||% NA, "\n\n")
+    cat("P-value correction:", r$p_adjust %||% NA, "\n")
+    if (!is.null(r$pairwise_family)) cat("Multiplicity family:", r$pairwise_family, "\n")
+    cat("\n")
     if (!is.null(r$test_suggestion)) {
       cat("=== TEST SUGGESTION / RATIONALE ===\n")
       cat(r$test_suggestion$summary, "\n\n")
     }
     cat("Raw cells are visualized, but pairwise hypothesis tests use biological replicate-level summaries.\n\n")
-    if (!is.null(r$transform_used) && r$transform_used != "none") cat("Transform:", r$transform_used, "\n\n")
-    if (!is.null(r$lmm_warnings)) cat("LMM Note:", r$lmm_warnings, "\n\n")
-    cat("=== OPTIONAL GLOBAL MODEL ===\n")
-    if (!is.null(r$anova_summary)) { print(r$anova_summary)
-      if (!has_lmerTest && grepl("Mixed", r$method)) cat("\nInstall 'lmerTest' for p-values.\n")
-    } else cat("Not run or not available for the selected grouping.\n")
+    if (include_tables) {
+      if (!is.null(r$descriptive)) { cat("=== DESCRIPTIVE ===\n"); print(as.data.frame(r$descriptive), row.names = FALSE); cat("\n") }
+      if (!is.null(r$pairwise))    { cat("=== FLEXIBLE PAIRWISE RESULTS ===\n"); print(as.data.frame(r$pairwise), row.names = FALSE); cat("\n") }
+    }
+    cat("=== GLOBAL MODEL ===\n")
+    if (!is.null(r$anova_text)) {
+      cat(r$anova_text, "\n")
+    } else if (!is.null(r$anova_summary)) {
+      cat(r$lmm$method %||% "Mixed model", "\n")
+      if (!is.null(r$lmm_formula)) cat("Formula:", r$lmm_formula, "\n")
+      if (!is.null(r$lmm_df_method)) cat("Degrees of freedom:", r$lmm_df_method, "\n")
+      print(r$anova_summary)
+    } else {
+      cat(r$global_model_message %||% "Not run, or not available for the selected grouping.\n")
+    }
+    if (!is.null(r$lmm_warnings) && length(r$lmm_warnings) > 0) {
+      cat("\nModel notes:\n"); for (w in r$lmm_warnings) cat("  -", w, "\n")
+    }
     if (!is.null(r$ranef_var)) { cat("\n=== RANDOM EFFECT VARIANCE ===\n"); print(r$ranef_var) }
-    if (!is.null(r$partial_eta2)) { cat("\n=== EFFECT SIZES (partial eta-squared) ===\n")
-      cat("small=0.01, medium=0.06, large=0.14\n"); print(r$partial_eta2, row.names = FALSE) }
+    if (!is.null(r$partial_eta2)) {
+      cat("\n=== EFFECT SIZES (partial eta-squared) ===\n")
+      cat("small=0.01, medium=0.06, large=0.14\n")
+      print(r$partial_eta2, row.names = FALSE)
+    }
+    if (!is.null(r$pairwise_emm)) {
+      cat("\n=== PAIRWISE (estimated marginal means) ===\n")
+      if (!is.null(r$emm_family)) cat(r$emm_family, "\n")
+      print(r$pairwise_emm)
+    }
+    cat("\n=== ASSUMPTION DIAGNOSTICS ===\n")
+    cat(format_assumption_diagnostics(r$diagnostics), "\n")
     cat("\nThe Pairwise tab is the primary flexible statistics output.\n")
-    if (!is.null(r$shapiro)) { cat(sprintf("\nShapiro-Wilk residual check: W=%.4f, p=%.4f\n", r$shapiro$statistic, r$shapiro$p.value)) }
-    if (!is.null(r$pairwise_emm)) { cat("\n=== PAIRWISE (emmeans) ===\n"); print(r$pairwise_emm) }
+  }
+
+  output$stat_output <- renderPrint({
+    req(stat_results()); print_stat_report(stat_results())
   })
 
   output$pairwise_table <- renderDT({
@@ -4693,25 +4782,9 @@ server <- function(input, output, session) {
     filename = function() paste0("stats_", input$stat_measure %||% input$measure, "_", Sys.Date(), ".txt"),
     content  = function(file) {
       r <- stat_results(); sink(file)
-      cat("CellMorphR Flexible Statistical Results\n"); cat("Date:", as.character(Sys.time()), "\n")
-      cat("Measure:", r$measurement %||% input$stat_measure %||% input$measure, "\n")
-      cat("Method:", r$method, "\n")
-      cat("Grouping variables:", r$grouping_variables %||% "Condition", "\n")
-      cat("Comparison mode:", r$comparison_mode %||% NA, "\n")
-      cat("Reference group:", r$reference_group %||% NA, "\n")
-      cat("Statistical unit:", r$statistical_unit %||% r$yvar_used, "\n")
-      cat("Pairwise test:", r$test %||% NA, "\n")
-      cat("P-value correction:", r$p_adjust %||% NA, "\n\n")
-      if (!is.null(r$test_suggestion)) {
-        cat("=== TEST SUGGESTION / RATIONALE ===\n")
-        cat(r$test_suggestion$summary, "\n\n")
-      }
-      cat("Important: raw cells are visualized, but pairwise hypothesis tests use biological replicate-level summaries.\n\n")
-      if (!is.null(r$descriptive)) { cat("=== DESCRIPTIVE ===\n"); print(as.data.frame(r$descriptive), row.names = FALSE) }
-      if (!is.null(r$pairwise)) { cat("\n=== FLEXIBLE PAIRWISE RESULTS ===\n"); print(as.data.frame(r$pairwise), row.names = FALSE) }
-      if (!is.null(r$anova_summary)) { cat("\n=== OPTIONAL GLOBAL MODEL ===\n"); print(r$anova_summary) }
-      if (!is.null(r$partial_eta2)) { cat("\n=== EFFECT SIZES ===\n"); print(r$partial_eta2, row.names = FALSE) }
-      if (!is.null(r$pairwise_emm)) { cat("\n=== PAIRWISE (emmeans) ===\n"); print(r$pairwise_emm) }
+      cat("CellMorphR ", APP_VERSION, " -- Flexible Statistical Results\n", sep = "")
+      cat("Date:", as.character(Sys.time()), "\n\n")
+      print_stat_report(r, include_tables = TRUE)
       sink()
     })
 
@@ -5169,7 +5242,7 @@ server <- function(input, output, session) {
       geom_text(aes(label = cell_label), size = base_sz / 3, fontface = "bold") +
       labs(x = NULL, y = NULL, fill = "-log10(p)",
            title = "Multi-Feature Statistical Summary",
-           subtitle = paste0("Two-way ANOVA on replicate ",
+           subtitle = paste0("Repeated-measures ANOVA (dish as error stratum) on replicate ",
                              if ((input$mf_summary %||% "median_val") == "mean_val") "means" else "medians",
                              ". * p<0.05, ** p<0.01, *** p<0.001"))
 
@@ -5188,9 +5261,10 @@ server <- function(input, output, session) {
 
   mf_importance_obj <- reactive({
     req(mf_results()); res <- mf_results()$results; req(nrow(res) > 0)
-    imp <- res %>% select(Feature, Condition_eta2, Time_eta2, Interaction_eta2) %>%
+    imp <- res %>% select(Feature, Condition_partial_eta2, Time_partial_eta2, Interaction_partial_eta2) %>%
       pivot_longer(-Feature, names_to = "Effect", values_to = "eta2") %>%
-      mutate(Effect = recode(Effect, Condition_eta2 = "Condition", Time_eta2 = "Time", Interaction_eta2 = "Interaction"))
+      mutate(Effect = recode(Effect, Condition_partial_eta2 = "Condition",
+                             Time_partial_eta2 = "Time", Interaction_partial_eta2 = "Interaction"))
     imp$Effect <- factor(imp$Effect, levels = c("Condition", "Time", "Interaction"))
     ggplot(imp, aes(x = reorder(Feature, eta2), y = eta2, fill = Effect)) +
       geom_col(position = "dodge", alpha = 0.85) + coord_flip() +
