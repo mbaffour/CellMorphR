@@ -177,8 +177,22 @@ validate_data <- function(df, col_map = NULL) {
   if (cond_col != "Condition") { df2$Condition <- df2[[cond_col]] }
   if (synthetic_time) {
     df2$Time_min <- 0
-  } else if (time_col != "Time_min") {
-    df2$Time_min <- suppressWarnings(as.numeric(df2[[time_col]]))
+  } else {
+    # Always coerce, including when the column is already called Time_min. Files
+    # with values like "30 min", "T30" or "0.5 h" used to stay character, which
+    # made every downstream sort lexical: 0, 120, 30, 60 (audit CM-17).
+    raw_time <- df2[[time_col]]
+    coerced <- suppressWarnings(as.numeric(as.character(raw_time)))
+    if (all(is.na(coerced)) && any(!is.na(raw_time) & nzchar(trimws(as.character(raw_time))))) {
+      return(list(
+        ok = FALSE, needs_mapping = TRUE,
+        msg = paste0("The time column \"", time_col, "\" is not numeric -- values such as \"",
+                     paste(utils::head(unique(stats::na.omit(as.character(raw_time))), 3), collapse = "\", \""),
+                     "\" could not be read as minutes.\nStrip the units (use 30, not \"30 min\"), ",
+                     "or map a different column to the time role below."),
+        cond_col = cond_col, time_col = time_col, rep_col = rep_col, all_cols = nms))
+    }
+    df2$Time_min <- coerced
   }
   if (rep_col  != "Replicate") { df2$Replicate <- df2[[rep_col]] }
 
@@ -186,25 +200,43 @@ validate_data <- function(df, col_map = NULL) {
   meta_cols <- unique(c("Condition", "Time_min", "Replicate",
                          cond_col, time_col, rep_col,
                          "Image", "Cell_ID", "ID"))
-  meta_cols <- meta_cols[!vapply(meta_cols, is.null, logical(1))]
   measure_cols <- setdiff(nms, meta_cols)
-  measure_cols <- measure_cols[sapply(df2[measure_cols], function(x) is.numeric(x))]
+  # vapply, not sapply: sapply(character(0), ...) returns list(), and indexing a
+  # character vector by a list is a hard error -- so the friendly "no numeric
+  # measurement columns" message below used to be unreachable in exactly the
+  # case it was written for (audit CM-5).
+  numeric_flag <- vapply(measure_cols, function(m) is.numeric(df2[[m]]), logical(1))
+  looks_numeric_but_is_not <- measure_cols[!numeric_flag & vapply(measure_cols, function(m) {
+    v <- as.character(df2[[m]])
+    v <- v[!is.na(v) & nzchar(trimws(v))]
+    length(v) > 0 && mean(!is.na(suppressWarnings(as.numeric(v)))) > 0.5
+  }, logical(1))]
+  measure_cols <- measure_cols[numeric_flag]
   id_pattern <- grepl("^id$|_id$|^id_|cell.?id|object.?id|label$|^index$", measure_cols, ignore.case = TRUE)
   measure_cols <- measure_cols[!id_pattern]
   # Also exclude constant columns
-  measure_cols <- measure_cols[sapply(measure_cols, function(m) {
+  measure_cols <- measure_cols[vapply(measure_cols, function(m) {
     v <- df2[[m]]; length(unique(na.omit(v))) > 1
-  })]
+  }, logical(1))]
+
+  parse_warning <- if (length(looks_numeric_but_is_not) > 0)
+    paste0("These columns look numeric but were read as text, so they are not available as measurements: ",
+           paste(looks_numeric_but_is_not, collapse = ", "),
+           ". Values such as \"n/a\", \"NA (auto)\", \"#DIV/0!\" or a unit suffix make a whole column text.")
+  else NULL
 
   if (length(measure_cols) == 0) {
     return(list(ok = FALSE, needs_mapping = FALSE,
-                msg = "No numeric measurement columns found. All numeric columns are constant or excluded."))
+                msg = paste(c("No numeric measurement columns found. All numeric columns are constant or excluded.",
+                              parse_warning), collapse = "\n")))
   }
 
   list(ok = TRUE, needs_mapping = FALSE,
-       msg = if (synthetic_time)
-               "Data loaded successfully. No time column found - samples will be compared directly."
-             else "Data loaded successfully.",
+       msg = paste(c(if (synthetic_time)
+                       "Data loaded successfully. No time column found - samples will be compared directly."
+                     else "Data loaded successfully.",
+                     parse_warning), collapse = "\n"),
+       parse_warning = parse_warning,
        measures = measure_cols, df = df2, synthetic_time = synthetic_time,
        cond_col = cond_col, time_col = time_col, rep_col = rep_col)
 }
