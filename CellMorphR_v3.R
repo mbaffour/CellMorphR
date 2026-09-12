@@ -707,6 +707,90 @@ hedges_g <- function(ctrl, trt, conf_level = 0.95) {
        else NA_character_)
 }
 
+# =============================================================================
+# ASSUMPTION DIAGNOSTICS (advisory only -- they never change the test that runs)
+# =============================================================================
+# The README has always documented a Levene test; until v3.2.0 none existed
+# (audit CM-12), and Shapiro-Wilk was printed without any statement of what it
+# did or did not do (audit CM-18). Both are computed here, on the same unit the
+# tests use, and both are labelled advisory: nothing in the app switches test on
+# the strength of them. Deciding to transform, or to move to the rank-based
+# test, stays with the user.
+
+#' Levene's test with median centering (Brown & Forsythe 1974), base R only.
+levene_test <- function(y, group) {
+  ok <- !is.na(y) & !is.na(group)
+  y <- as.numeric(y[ok]); group <- droplevels(factor(group[ok]))
+  if (nlevels(group) < 2) return(NULL)
+  counts <- table(group)
+  if (any(counts < 2)) return(NULL)
+  centres <- tapply(y, group, median, na.rm = TRUE)
+  z <- abs(y - centres[as.character(group)])
+  if (all(abs(z - z[1]) < .Machine$double.eps^0.5)) return(NULL)  # no spread at all
+  fit <- tryCatch(anova(lm(z ~ group)), error = function(e) NULL)
+  if (is.null(fit)) return(NULL)
+  list(statistic = fit[["F value"]][1], df1 = fit[["Df"]][1], df2 = fit[["Df"]][2],
+       p.value = fit[["Pr(>F)"]][1], n_groups = nlevels(group),
+       method = "Levene's test with median centering (Brown & Forsythe, 1974)")
+}
+
+#' Largest / smallest group SD. A ratio above ~3 is the usual rule of thumb for
+#' variance heterogeneity that Welch's test handles and a pooled test does not.
+variance_ratio <- function(y, group) {
+  ok <- !is.na(y) & !is.na(group)
+  y <- as.numeric(y[ok]); group <- droplevels(factor(group[ok]))
+  if (nlevels(group) < 2) return(NULL)
+  sds <- tapply(y, group, sd)
+  sds <- sds[is.finite(sds) & sds > 0]
+  if (length(sds) < 2) return(NULL)
+  list(ratio = max(sds) / min(sds), min_sd = min(sds), max_sd = max(sds),
+       min_group = names(sds)[which.min(sds)], max_group = names(sds)[which.max(sds)])
+}
+
+#' Run the advisory diagnostics on a set of replicate-level summaries.
+assumption_diagnostics <- function(rep_df, yvar = "Stat_Value", group_col = "Statistics_Group",
+                                   residuals = NULL) {
+  if (is.null(rep_df) || nrow(rep_df) == 0 || !yvar %in% names(rep_df)) return(NULL)
+  y <- rep_df[[yvar]]; g <- rep_df[[group_col]]
+  sw_input <- if (!is.null(residuals)) residuals else
+    unlist(lapply(split(y, g), function(v) v - mean(v, na.rm = TRUE)), use.names = FALSE)
+  sw_input <- sw_input[is.finite(sw_input)]
+  shapiro <- if (length(sw_input) >= 3 && length(unique(sw_input)) > 1)
+    tryCatch(shapiro.test(sw_input), error = function(e) NULL) else NULL
+  list(
+    shapiro = shapiro,
+    shapiro_on = if (!is.null(residuals)) "model residuals" else "within-group centred replicate summaries",
+    levene = levene_test(y, g),
+    variance_ratio = variance_ratio(y, g),
+    advisory = paste(
+      "These diagnostics are ADVISORY. CellMorphR does not switch test on them:",
+      "the test you selected is the test that was run. Use them to decide whether to",
+      "transform the data (Data tab) or to choose the Wilcoxon rank-sum test."
+    )
+  )
+}
+
+#' Printable block for the Statistics output and the downloaded report.
+format_assumption_diagnostics <- function(d) {
+  if (is.null(d)) return("Assumption diagnostics: not available for these groups.")
+  out <- character(0)
+  if (!is.null(d$shapiro)) {
+    out <- c(out, sprintf("Normality  -- Shapiro-Wilk on %s: W = %.4f, p = %s",
+                          d$shapiro_on, d$shapiro$statistic, format_p_value(d$shapiro$p.value)))
+  } else out <- c(out, "Normality  -- Shapiro-Wilk: not computable (too few or constant values).")
+  if (!is.null(d$levene)) {
+    out <- c(out, sprintf("Variance   -- %s: F(%d, %d) = %.4f, p = %s",
+                          d$levene$method, d$levene$df1, d$levene$df2,
+                          d$levene$statistic, format_p_value(d$levene$p.value)))
+  } else out <- c(out, "Variance   -- Levene's test: not computable (a group has fewer than 2 replicates).")
+  if (!is.null(d$variance_ratio)) {
+    out <- c(out, sprintf("Variance   -- largest/smallest group SD = %.2f (%s vs %s)%s",
+                          d$variance_ratio$ratio, d$variance_ratio$max_group, d$variance_ratio$min_group,
+                          if (d$variance_ratio$ratio > 3) "  <- heterogeneous; Welch's t-test already allows for this" else ""))
+  }
+  paste(c(out, d$advisory), collapse = "\n")
+}
+
 compute_skewness <- function(x) {
   x <- x[!is.na(x)]
   n <- length(x)
