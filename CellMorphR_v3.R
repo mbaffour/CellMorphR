@@ -650,6 +650,63 @@ run_pairwise_tests <- function(rep_df, comparison_tbl, yvar = "Stat_Value",
   res
 }
 
+# =============================================================================
+# STANDARDISED EFFECT SIZE
+# =============================================================================
+# Up to v3.1.2 the Effect Sizes tab reported a raw Cohen's d computed with
+# sqrt((var1 + var2)/2) -- the unweighted average, which is only the pooled SD
+# when the two groups have equal n -- with no small-sample correction and no
+# confidence interval, while the figure drew dotted "large effect" guides at
+# +/-0.8 (audit CM-3). At n = 3 vs 3 that d is 25% larger than the unbiased
+# estimate. This computes Hedges' g instead: correctly pooled SD, Hedges'
+# small-sample correction J, and a noncentral-t confidence interval, which at
+# n = 3 is wide enough to make the point that three dishes cannot establish
+# "large effect".
+
+hedges_g <- function(ctrl, trt, conf_level = 0.95) {
+  ctrl <- ctrl[is.finite(ctrl)]; trt <- trt[is.finite(trt)]
+  n1 <- length(ctrl); n2 <- length(trt)
+  blank <- function(note) list(g = NA_real_, d = NA_real_, ci_low = NA_real_, ci_high = NA_real_,
+                               pooled_sd = NA_real_, J = NA_real_, n_ctrl = n1, n_trt = n2,
+                               conf_level = conf_level, note = note)
+  if (n1 < 2 || n2 < 2) {
+    return(blank(paste0("Not estimable: needs at least 2 biological replicates per group (got ",
+                        n1, " and ", n2, ").")))
+  }
+  df <- n1 + n2 - 2
+  # (n-1)-weighted pooled SD: valid for unequal n, unlike the average of variances.
+  s_pool <- sqrt(((n1 - 1) * var(ctrl) + (n2 - 1) * var(trt)) / df)
+  if (!is.finite(s_pool) || s_pool <= 0) {
+    return(blank("Not estimable: the pooled standard deviation is zero (all replicates identical)."))
+  }
+  d <- (mean(trt) - mean(ctrl)) / s_pool
+  J <- 1 - 3 / (4 * df - 1)            # Hedges' small-sample correction
+  g <- J * d
+
+  # Noncentral-t interval: invert the distribution of the observed t statistic.
+  nfac <- sqrt((n1 * n2) / (n1 + n2))
+  t_obs <- d * nfac
+  alpha <- (1 - conf_level) / 2
+  solve_ncp <- function(target) {
+    # pt() warns about precision at the extremes of the bracket; that is noise
+    # from the search, not from the answer uniroot converges on.
+    f <- function(ncp) suppressWarnings(pt(t_obs, df, ncp)) - target
+    lo <- t_obs - 10 * max(1, abs(t_obs)) - 10
+    hi <- t_obs + 10 * max(1, abs(t_obs)) + 10
+    tryCatch(uniroot(f, c(lo, hi), tol = 1e-6)$root, error = function(e) NA_real_)
+  }
+  ncp_hi <- solve_ncp(alpha)          # upper limit
+  ncp_lo <- solve_ncp(1 - alpha)      # lower limit
+  list(g = g, d = d,
+       ci_low  = J * ncp_lo / nfac,
+       ci_high = J * ncp_hi / nfac,
+       pooled_sd = s_pool, J = J, n_ctrl = n1, n_trt = n2, conf_level = conf_level,
+       note = if (min(n1, n2) < 4)
+         paste0("Based on ", n1, " and ", n2,
+                " biological replicates: the interval is very wide and a point estimate alone is not interpretable.")
+       else NA_character_)
+}
+
 compute_skewness <- function(x) {
   x <- x[!is.na(x)]
   n <- length(x)
