@@ -887,36 +887,109 @@ suggest_statistical_workflow <- function(rep_df, comparison_tbl = NULL, comparis
 }
 
 # =============================================================================
+# DATA TRANSFORMS (one pipeline, always reported)
+# =============================================================================
+# Every analysis in the app -- the pairwise tests, the global models, the figure
+# axes -- must agree about what scale the numbers are on, and the report must
+# say so. In particular the log transform applies a DATA-DEPENDENT shift when a
+# column contains non-positive values, so the shift constant is part of the
+# answer and is carried around with the values (audit CM-13, CM-14).
+
+apply_measure_transform <- function(x, transform = "none") {
+  transform <- transform %||% "none"
+  if (transform == "log") {
+    shift <- 0
+    if (any(x <= 0, na.rm = TRUE)) shift <- -min(x, na.rm = TRUE) + 1
+    list(values = log(x + shift), transform = "log", shift = shift,
+         label = if (shift != 0)
+                   paste0("log(x + ", formatC(shift, format = "g", digits = 6, width = 1),
+                          ")  [shift chosen so the smallest value maps to 1]")
+                 else "log(x)")
+  } else if (transform == "sqrt") {
+    list(values = sqrt(pmax(x, 0)), transform = "sqrt", shift = 0,
+         label = "sqrt(max(x, 0))")
+  } else {
+    list(values = x, transform = "none", shift = 0, label = "none (raw values)")
+  }
+}
+
+#' Apply one transform to several measurement columns, keeping a per-column
+#' record of exactly what was done (attached as the "transform_info" attribute).
+apply_transform_to_columns <- function(df, cols, transform = "none") {
+  transform <- transform %||% "none"
+  info <- list()
+  for (m in cols) {
+    if (!m %in% names(df) || !is.numeric(df[[m]])) next
+    tr <- tryCatch(apply_measure_transform(df[[m]], transform), error = function(e) NULL)
+    if (is.null(tr)) next
+    df[[m]] <- tr$values
+    info[[m]] <- tr[c("transform", "shift", "label")]
+  }
+  attr(df, "transform_info") <- info
+  attr(df, "transform") <- transform
+  df
+}
+
+#' One-line description of the transform applied to a single measurement, for
+#' reports, captions and axis labels.
+describe_transform <- function(df_or_info, measure, transform = NULL) {
+  info <- if (is.list(df_or_info) && !is.null(attr(df_or_info, "transform_info")))
+            attr(df_or_info, "transform_info") else df_or_info
+  entry <- if (is.list(info) && !is.null(info[[measure]])) info[[measure]] else NULL
+  if (!is.null(entry)) return(entry$label)
+  apply_measure_transform(numeric(0), transform %||% "none")$label
+}
+
+# =============================================================================
 # ROBUST LMM FITTING
 # =============================================================================
 
+# The LMM is fitted on cells, with the experimental design carried by the random
+# effects. A random INTERCEPT per dish, (1|Rep_unique), only absorbs variation
+# that is constant over the whole time course. Condition varies between dishes,
+# so its test is protected by that term -- but Time and Condition:Time vary
+# WITHIN a dish, and up to v3.1.2 they were therefore tested against the
+# cell-to-cell residual: 99-100% false positives once dishes drift over time
+# (audit CM-2). Adding (1|Rep_unique:Time_fac) gives each dish its own offset at
+# each timepoint -- focus drift, medium evaporation, per-session segmentation
+# quality -- which is the error term those two effects belong to.
+
+LMM_LABEL <- "Linear mixed model on cells (dish and dish x timepoint as random effects)"
+
 fit_lmm_safe <- function(df, measure, transform = "none") {
-  transform_used <- transform
-  if (transform == "log") {
-    vals <- df[[measure]]
-    df[[measure]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals - min(vals, na.rm = TRUE) + 1) else log(vals)
-  } else if (transform == "sqrt") {
-    df[[measure]] <- sqrt(pmax(df[[measure]], 0))
-  }
+  tr <- apply_measure_transform(df[[measure]], transform)
+  df[[measure]] <- tr$values
   df <- df[!is.na(df[[measure]]), ]
-  df$Condition <- factor(df$Condition)
-  df$Time_fac  <- factor(df$Time_min)
+  df$Condition <- droplevels(factor(df$Condition))
+  df$Time_fac  <- droplevels(factor(df$Time_min))
   df$Replicate <- factor(df$Replicate)
-  df$Rep_unique <- interaction(df$Condition, df$Replicate, drop = TRUE)
-  n_rep_levels <- nlevels(droplevels(df$Rep_unique))
+  df$Rep_unique <- droplevels(interaction(df$Condition, df$Replicate, drop = TRUE))
+
+  no_model <- function(msg) list(
+    model = NULL, method = "No global model", warnings = msg,
+    fallback_used = FALSE, fitted = FALSE, singular = FALSE,
+    transform_used = tr$transform, transform_label = tr$label, transform_shift = tr$shift)
+
+  n_rep_levels <- nlevels(df$Rep_unique)
   if (n_rep_levels < 3) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = paste0("Only ", n_rep_levels,
-                  " unique replicate groups (need >= 3). Falling back to ANOVA."),
-                fallback_used = TRUE, transform_used = transform_used))
+    return(no_model(paste0("Only ", n_rep_levels,
+      " unique replicate groups (need at least 3). No global model was fitted -- ",
+      "the Pairwise results above are still valid.")))
   }
-  cell_counts <- table(df$Condition, df$Time_fac)
-  if (any(cell_counts == 0)) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = "Some groups have zero observations. Falling back to ANOVA.",
-                fallback_used = TRUE, transform_used = transform_used))
+  if (any(table(df$Condition, df$Time_fac) == 0)) {
+    return(no_model(paste0("At least one Condition x Timepoint combination has no cells. ",
+      "No global model was fitted -- the Pairwise results above are still valid.")))
   }
-  formula_lmm <- as.formula(paste0(measure, " ~ Condition * Time_fac + (1|Rep_unique)"))
+
+  # The dish x timepoint term is only estimable when dishes are measured at more
+  # than one timepoint with more than one cell per dish per timepoint; otherwise
+  # it is confounded with the residual.
+  n_times <- nlevels(df$Time_fac)
+  cells_per_cell <- table(df$Rep_unique, df$Time_fac)
+  can_fit_reptime <- n_times > 1 && min(cells_per_cell[cells_per_cell > 0]) >= 2
+  rand <- if (can_fit_reptime) "(1|Rep_unique) + (1|Rep_unique:Time_fac)" else "(1|Rep_unique)"
+  formula_lmm <- as.formula(paste0(measure, " ~ Condition * Time_fac + ", rand))
+
   warn_msgs <- character()
   model <- tryCatch(
     withCallingHandlers({
