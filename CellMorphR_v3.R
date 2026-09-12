@@ -1255,24 +1255,39 @@ run_anova_for_feature <- function(df, measure, yvar = "median_val") {
   )
 }
 
-detect_earliest_divergence <- function(df, measure, ref_cond, alpha = 0.05) {
+# The multiplicity family here is every treatment x timepoint comparison for this
+# feature, adjusted together. Up to v3.1.2 Holm was applied across timepoints
+# WITHIN each treatment, which was a third, different family definition in the
+# same app -- and the "earliest significant timepoint" it reported was sensitive
+# to that choice (audit CM-21).
+detect_earliest_divergence <- function(df, measure, ref_cond, alpha = 0.05,
+                                       correction = "holm") {
   rs <- compute_replicate_summaries(df, measure)
   times <- sort(unique(rs$Time_min))
   trt_conds <- setdiff(unique(as.character(rs$Condition)), ref_cond)
-  results <- list()
-  for (trt in trt_conds) {
-    p_vals <- sapply(times, function(tm) {
-      ctrl <- rs$median_val[rs$Condition == ref_cond & rs$Time_min == tm]
-      treat <- rs$median_val[rs$Condition == trt & rs$Time_min == tm]
-      if (length(ctrl) < 2 || length(treat) < 2) return(NA)
-      tryCatch(t.test(treat, ctrl, var.equal = FALSE)$p.value, error = function(e) NA) })
-    p_adj <- p.adjust(p_vals, method = "holm")
-    first_sig <- which(p_adj < alpha)
-    earliest <- if (length(first_sig) > 0) times[first_sig[1]] else NA
-    earliest_p <- if (length(first_sig) > 0) p_adj[first_sig[1]] else NA
-    results[[length(results) + 1]] <- data.frame(Feature = measure, Treatment = trt,
-      Earliest_Significant_Time = earliest, p_adj_at_earliest = round(earliest_p, 4), stringsAsFactors = FALSE)
-  }
+  if (length(trt_conds) == 0 || length(times) == 0) return(NULL)
+  grid <- expand.grid(Time_min = times, Treatment = trt_conds,
+                      KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+  grid$p_raw <- vapply(seq_len(nrow(grid)), function(i) {
+    ctrl  <- rs$median_val[rs$Condition == ref_cond        & rs$Time_min == grid$Time_min[i]]
+    treat <- rs$median_val[rs$Condition == grid$Treatment[i] & rs$Time_min == grid$Time_min[i]]
+    if (length(ctrl) < 2 || length(treat) < 2) return(NA_real_)
+    tryCatch(t.test(treat, ctrl, var.equal = FALSE)$p.value, error = function(e) NA_real_)
+  }, numeric(1))
+  corr <- if (is.null(correction) || correction == "none") "none" else correction
+  grid$p_adj <- if (corr == "none") grid$p_raw else p.adjust(grid$p_raw, method = corr)
+  family_size <- sum(!is.na(grid$p_raw))
+  results <- lapply(trt_conds, function(trt) {
+    sub <- grid[grid$Treatment == trt, , drop = FALSE]
+    sub <- sub[order(sub$Time_min), , drop = FALSE]
+    first_sig <- which(!is.na(sub$p_adj) & sub$p_adj < alpha)
+    data.frame(Feature = measure, Treatment = trt,
+      Earliest_Significant_Time = if (length(first_sig) > 0) sub$Time_min[first_sig[1]] else NA,
+      p_adj_at_earliest = if (length(first_sig) > 0) round(sub$p_adj[first_sig[1]], 4) else NA,
+      Multiplicity_Family = paste0(corr, " across all ", family_size,
+                                   " treatment x timepoint comparisons for this feature"),
+      stringsAsFactors = FALSE)
+  })
   do.call(rbind, results)
 }
 
@@ -2124,7 +2139,7 @@ ui <- page_navbar(
           tags$h6("Understanding Trajectory Plots"),
           tags$p(tags$strong("Each point"), " is the median (or mean) of one biological replicate."),
           tags$p(tags$strong("Diverging lines"), " between conditions = Condition x Time interaction."),
-          tags$p(tags$strong("SEM ribbons"), " computed from replicate-level summaries (N=3).")
+          tags$p(tags$strong("SEM ribbons"), " computed from replicate-level summaries: SD of the replicate values divided by the square root of the number of replicates in that group.")
         ))
       )
     )
@@ -3640,7 +3655,20 @@ server <- function(input, output, session) {
   output$data_table <- renderDT({ req(raw_data()); datatable(head(raw_data(), 500), options = list(pageLength = 15, scrollX = TRUE), caption = "First 500 rows") })
   output$n_cells_txt  <- renderText({ req(raw_data()); format(nrow(raw_data()), big.mark = ",") })
   output$n_groups_txt <- renderText({ req(raw_data()); nc <- length(unique(raw_data()$Condition)); nt <- length(unique(raw_data()$Time_min)); paste0(nc, " x ", nt, " = ", nc * nt) })
-  output$n_reps_txt   <- renderText({ req(raw_data()); paste(length(unique(raw_data()$Replicate)), "per group") })
+  output$n_reps_txt   <- renderText({
+    req(raw_data())
+    # The global count of distinct replicate labels overstates n whenever a
+    # replicate is missing from one condition, which is the case this readout
+    # most needs to get right (audit CM-19).
+    df <- raw_data()
+    per_group <- tapply(as.character(df$Replicate),
+                        interaction(df$Condition, df$Time_min, drop = TRUE),
+                        function(x) length(unique(x)))
+    per_group <- per_group[!is.na(per_group)]
+    if (length(per_group) == 0) return("0")
+    lo <- min(per_group); hi <- max(per_group)
+    if (lo == hi) paste(hi, "per group") else paste0(lo, "-", hi, " per group (unbalanced)")
+  })
 
   output$feature_diagnostics_table <- renderDT({
     req(raw_data(), measure_cols()); df <- raw_data(); mc <- measure_cols()
