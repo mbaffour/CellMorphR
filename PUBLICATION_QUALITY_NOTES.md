@@ -4,13 +4,32 @@ Audit of CellMorphR's plotting/presentation against a figure-publication rubric,
 plus the safe presentation improvements applied on the `claude/publication-quality`
 branch and the deeper changes deferred as recommendations.
 
+> **Status: recommendations, not applied code.** Every row this document marks
+> **Fixed** was applied on the `claude/publication-quality` branch, against a
+> repository layout (`R-code/`, `python_script/`) that does not exist here. None
+> of them are present in `CellMorphR_v3.R` on this branch: there is no
+> `palette_colors()` (conditions are still coloured by `scales::hue_pal()` and a
+> fixed blue/red pair for n=2), no `axis_label()` helper and no measurement-unit
+> input, and no "band/bars = SEM" wording. Read the **Fixed** column as
+> *proposed*. The colourblind-safe palette in particular is **not** in effect, so
+> do not rely on this document when choosing colours for a figure.
+>
+> The statistical findings are tracked separately in
+> [`AUDIT-2026-09.md`](AUDIT-2026-09.md) (finding CM-11 is this document); the
+> corrections landed in 3.2.0 and are described in
+> [`CHANGELOG.md`](CHANGELOG.md).
+
 > **Scope guard.** These changes touch **presentation only**. The statistical
-> methodology — per-replicate summaries, two-way ANOVA on replicate summaries,
-> linear mixed model with replicate as a random effect, Welch pairwise tests,
+> methodology — per-replicate summaries, the global models, Welch pairwise tests,
 > Holm correction, effect sizes, assumption diagnostics — was **not altered**.
 > The tool's anti-pseudoreplication design is its core strength and was left
 > untouched. Statistics were **not re-run/verified** in this pass (no R/Python
 > stats validation was performed here); only plotting was smoke-tested.
+>
+> That disclaimer was accurate, and it is why the 2026-09 statistical audit
+> exists. The claim that the anti-pseudoreplication design was the tool's core
+> strength turned out to be half right: true of the pairwise path, false of both
+> global models, which are corrected in 3.2.0.
 
 ---
 
