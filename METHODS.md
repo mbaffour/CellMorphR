@@ -81,6 +81,42 @@ linear) fit through the replicate values and carries no interval of its own.
 Conditions are coloured with the Okabe-Ito colourblind-safe palette unless the
 user chooses otherwise.
 
+When *normalise to baseline* is on, each replicate's summary is divided by
+(fold change) or has subtracted (difference) that same replicate's value at the
+earliest timepoint; replicates with no baseline measurement are excluded and
+named. The normalisation is always computed on untransformed values, whatever
+transform is selected on the Data tab, because a ratio of log values is not a
+fold change; the subtitle states this when it applies. Fold changes are summarised by the geometric mean (mean of log2 fold
+changes, back-transformed) with SD, SEM or 95% CI computed on the log2 scale
+and back-transformed. This normalisation affects the figure only.
+
+**3c. Fraction of cells beyond a threshold.** For each biological replicate
+the percentage of cells whose untransformed measurement exceeds (or falls
+below) a cut-off is computed. The cut-off is either an absolute value or a
+multiple (default 2) of the pooled median of the reference condition's cells at
+its earliest timepoint; the exact value is printed on the figure. The
+per-replicate percentages are then the unit of analysis: the figure shows each
+replicate, the mean across replicates and the SD, SEM or 95% t-interval across
+replicates (drawn clipped to 0–100%), and any significance brackets are
+Welch's t-tests (or Wilcoxon) on those percentages with the Statistics tab's
+correction over one stated family. Cells are never pooled into a single
+proportion. With three replicates near 0% or 100% such tests are crude and
+should be read descriptively.
+
+**3d. Replicate planning.** For each treatment group at each timepoint the
+between-replicate SD of the replicate summaries is pooled with the reference
+group's (weighted by degrees of freedom). The number of replicates per group
+needed to detect a stated difference at the chosen power with a two-sample
+t-test is obtained from `power.t.test`, both for the SD point estimate and for
+its upper 95% chi-square bound (conservative). The target difference defaults
+to the observed one but should be set to the smallest biologically meaningful
+difference. The calculation plans for the pairwise within-timepoint comparison
+(the test behind the figure brackets), not for the repeated-measures model, and
+it pools the two groups' SDs as if equal although the pairwise test is Welch's;
+this is the usual simplification for planning. Values are on the scale the
+Statistics tab uses, i.e. after any Data-tab transform. This is prospective
+planning; "observed power" of a completed comparison is not reported.
+
 **4. Export.** Figures are rendered with ggplot2 and exported at user-set
 dimensions and resolution as PDF, SVG, TIFF, EPS, PNG, or as editable vector
 graphics in PowerPoint (officer/rvg), so text and shapes remain editable.
@@ -90,7 +126,7 @@ graphics in PowerPoint (officer/rvg), so text and shapes remain editable.
 ## Copy-paste Methods paragraph
 
 > Single-cell morphometric data were visualized and analyzed in CellMorphR
-> v3.3.0 (Awuah, M.B.; https://github.com/mbaffour/CellMorphR), an R (v4.6.0)
+> v3.4.0 (Awuah, M.B.; https://github.com/mbaffour/CellMorphR), an R (v4.6.0)
 > Shiny application built on ggplot2. Distributions of single-cell
 > measurements were plotted per condition and timepoint as violin (kernel
 > density) plots with individual biological-replicate summary values (median

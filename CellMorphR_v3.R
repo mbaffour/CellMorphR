@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.3.0
+# Version 3.4.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.3.0.
+#   anti-pseudoreplication statistics. Version 3.4.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.3.0"
+APP_VERSION <- "3.4.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -285,6 +285,178 @@ error_measure_label <- function(kind) {
   switch(kind, sem = "SEM", sd = "SD", ci95 = "95% CI", kind)
 }
 
+# =============================================================================
+# BASELINE NORMALISATION OF REPLICATE SUMMARIES (Trajectories tab, 3.4.0)
+# Each dish is divided by (or has subtracted) ITS OWN value at the earliest
+# timepoint, so the figure shows how each replicate moved from where it
+# started. Dishes with no baseline row, or a zero baseline under fold change,
+# are dropped and named. Presentation only: the Statistics tab never reads
+# these values.
+# =============================================================================
+normalise_to_baseline <- function(rep_summary, yvar = "median_val", mode = "none") {
+  rs <- as.data.frame(rep_summary)
+  if (identical(mode, "none") || nrow(rs) == 0) return(list(rs = rs, dropped = character(0), t0 = NA_real_))
+  t0 <- min(rs$Time_min, na.rm = TRUE)
+  key  <- paste(rs$Condition, rs$Replicate, sep = " / ")
+  base <- rs[rs$Time_min == t0, , drop = FALSE]
+  bval <- setNames(base[[yvar]], paste(base$Condition, base$Replicate, sep = " / "))[key]
+  bad  <- is.na(bval) | (identical(mode, "fold") & bval == 0)
+  out  <- rs
+  out[[yvar]] <- if (identical(mode, "fold")) rs[[yvar]] / bval else rs[[yvar]] - bval
+  out <- out[!bad, , drop = FALSE]
+  list(rs = out, dropped = unique(key[bad]), t0 = t0)
+}
+
+# Across-replicate summary of the trajectory values as plotted. Fold changes are
+# ratios, so under "fold" the centre is the GEOMETRIC mean (mean of log2 fold
+# changes, back-transformed) and the SD / SEM / 95% CI are computed on log2 and
+# back-transformed too, giving the asymmetric interval a ratio deserves. An
+# arithmetic mean of ratios is biased upward and its symmetric bars can dip
+# below zero. Raw values and differences keep the ordinary arithmetic summary.
+summarise_trajectory <- function(rs, yvar = "median_val", mode = "none", err_kind = "sem") {
+  rs <- as.data.frame(rs)
+  on_log <- identical(mode, "fold")
+  v <- rs[[yvar]]
+  d <- data.frame(Condition = rs$Condition, Time_min = rs$Time_min,
+                  x = if (on_log) log2(v) else v, stringsAsFactors = FALSE)
+  d <- d[is.finite(d$x), , drop = FALSE]
+  out <- d %>% group_by(Condition, Time_min) %>%
+    summarise(n_reps = n(), centre_raw = mean(x), sd_val = sd(x), .groups = "drop") %>%
+    as.data.frame()
+  out$sem  <- out$sd_val / sqrt(out$n_reps)
+  out$ci95 <- ifelse(out$n_reps > 1, qt(0.975, pmax(out$n_reps - 1, 1)) * out$sem, NA_real_)
+  err <- if (is.null(err_kind)) rep(NA_real_, nrow(out))
+         else out[[switch(err_kind, sd = "sd_val", sem = "sem", ci95 = "ci95", "sem")]]
+  bt <- if (on_log) function(z) 2^z else identity
+  out$centre <- bt(out$centre_raw)
+  out$lo <- bt(out$centre_raw - err)
+  out$hi <- bt(out$centre_raw + err)
+  out$scale <- if (on_log) "log2 (geometric)" else "linear (arithmetic)"
+  out
+}
+
+# =============================================================================
+# FRACTION OF CELLS BEYOND A THRESHOLD (Thresholds tab, 3.4.0)
+# The classic filamentation readout: the share of cells in each dish whose RAW
+# measurement lies above (or below) a cut-off. The per-dish fractions are then
+# handled exactly like any other replicate summary -- mean across dishes,
+# SD/SEM/CI across dishes, Welch tests across dishes -- never as one binomial
+# over the pooled cells, which would be pseudoreplication by another route.
+# =============================================================================
+threshold_value <- function(df, measure, mode = "multiple", value = 2, ref_cond = NULL) {
+  if (identical(mode, "absolute")) {
+    return(list(threshold = as.numeric(value), mode = "absolute", ref = NA_character_, t0 = NA_real_, base = NA_real_))
+  }
+  conds <- as.character(df$Condition)
+  ref <- if (!is.null(ref_cond) && ref_cond %in% conds) ref_cond else unique(conds)[1]
+  sel <- conds == ref & !is.na(df$Time_min)
+  t0 <- suppressWarnings(min(df$Time_min[sel], na.rm = TRUE))
+  base <- median(df[[measure]][sel & df$Time_min == t0], na.rm = TRUE)
+  list(threshold = as.numeric(value) * base, mode = "multiple", multiple = as.numeric(value),
+       ref = ref, t0 = t0, base = base)
+}
+
+compute_fraction_summaries <- function(df, measure, threshold, direction = "above") {
+  flag <- if (identical(direction, "below")) df[[measure]] < threshold else df[[measure]] > threshold
+  df$.flag <- flag
+  df %>%
+    group_by(Condition, Time_min, Replicate) %>%
+    summarise(
+      n_cells   = sum(!is.na(.data[[measure]])),
+      n_flagged = sum(.data$.flag, na.rm = TRUE),
+      frac_val  = ifelse(n_cells > 0, n_flagged / n_cells * 100, NA_real_),
+      .groups   = "drop"
+    )
+}
+
+# =============================================================================
+# REPLICATE PLANNER (Statistics tab > Power, 3.4.0)
+# Plans the NEXT experiment from the between-dish SD seen in this one: how many
+# dishes per group would detect a difference of `delta` with the requested
+# power. Deliberately NOT the "observed power" of a comparison already run --
+# that is a one-to-one function of its p-value and adds nothing to it
+# (Hoenig & Heisey 2001, Am Stat 55:19).
+# =============================================================================
+plan_replicates <- function(rep_summary, ref_cond, yvar = "median_val",
+                            delta = NULL, power = 0.8, sig_level = 0.05) {
+  rs <- as.data.frame(rep_summary)
+  empty <- data.frame(Condition = character(), Time_min = numeric(), N_treated = integer(),
+                      N_reference = integer(), Observed_Difference = numeric(),
+                      Between_Replicate_SD = numeric(), SD_df = numeric(),
+                      Between_Replicate_SD_Upper95 = numeric(), Target_Difference = numeric(),
+                      Replicates_Needed_Per_Group = numeric(), Replicates_Needed_Conservative = numeric(),
+                      stringsAsFactors = FALSE)
+  if (nrow(rs) == 0 || is.null(ref_cond) || !ref_cond %in% as.character(rs$Condition)) return(empty)
+  groups <- unique(rs[as.character(rs$Condition) != ref_cond, c("Condition", "Time_min"), drop = FALSE])
+  if (nrow(groups) == 0) return(empty)
+  rows <- lapply(seq_len(nrow(groups)), function(i) {
+    cnd <- as.character(groups$Condition[i]); tm <- groups$Time_min[i]
+    v_trt <- rs[[yvar]][as.character(rs$Condition) == cnd & rs$Time_min == tm]
+    v_ref <- rs[[yvar]][as.character(rs$Condition) == ref_cond & rs$Time_min == tm]
+    v_trt <- v_trt[is.finite(v_trt)]; v_ref <- v_ref[is.finite(v_ref)]
+    n_t <- length(v_trt); n_r <- length(v_ref)
+    obs <- if (n_t > 0 && n_r > 0) mean(v_trt) - mean(v_ref) else NA_real_
+    ss  <- c(if (n_t > 1) (n_t - 1) * var(v_trt), if (n_r > 1) (n_r - 1) * var(v_ref))
+    dfp <- sum(c(if (n_t > 1) n_t - 1, if (n_r > 1) n_r - 1))
+    sd_p <- if (dfp > 0) sqrt(sum(ss) / dfp) else NA_real_
+    target <- if (is.null(delta) || !is.finite(delta) || delta == 0) abs(obs) else abs(delta)
+    # An SD from a handful of dishes is itself uncertain: with 4 df its 95%
+    # upper bound is ~2.9x the estimate. Plan with that bound as well, so the
+    # table shows both the point-estimate N and a conservative N.
+    sd_hi <- if (dfp > 0 && is.finite(sd_p)) sd_p * sqrt(dfp / qchisq(0.025, dfp)) else NA_real_
+    n_for <- function(sdv) {
+      if (!is.finite(sdv) || sdv <= 0 || !is.finite(target) || target <= 0) return(NA_real_)
+      tryCatch(ceiling(power.t.test(delta = target, sd = sdv, power = power,
+                                    sig.level = sig_level, type = "two.sample")$n),
+               error = function(e) NA_real_)
+    }
+    data.frame(Condition = cnd, Time_min = tm, N_treated = n_t, N_reference = n_r,
+               Observed_Difference = obs, Between_Replicate_SD = sd_p, SD_df = dfp,
+               Between_Replicate_SD_Upper95 = sd_hi, Target_Difference = target,
+               Replicates_Needed_Per_Group = n_for(sd_p),
+               Replicates_Needed_Conservative = n_for(sd_hi), stringsAsFactors = FALSE)
+  })
+  do.call(rbind, rows)
+}
+
+# Power at each candidate N per group, for the planner's curve.
+plan_power_curve <- function(plan, n_range = 2:12, sig_level = 0.05) {
+  if (nrow(plan) == 0) return(data.frame(Condition = character(), Time_min = numeric(), N = integer(), Power = numeric()))
+  rows <- lapply(seq_len(nrow(plan)), function(i) {
+    sd_p <- plan$Between_Replicate_SD[i]; d <- plan$Target_Difference[i]
+    pw <- vapply(n_range, function(nn) {
+      if (!is.finite(sd_p) || sd_p <= 0 || !is.finite(d) || d <= 0) return(NA_real_)
+      tryCatch(power.t.test(n = nn, delta = d, sd = sd_p, sig.level = sig_level, type = "two.sample")$power,
+               error = function(e) NA_real_)
+    }, numeric(1))
+    data.frame(Condition = plan$Condition[i], Time_min = plan$Time_min[i], N = n_range, Power = pw,
+               stringsAsFactors = FALSE)
+  })
+  do.call(rbind, rows)
+}
+
+# =============================================================================
+# COLOUR-VISION-DEFICIENCY PREVIEW (Data tab, 3.4.0)
+# Pushes the condition palette through colorspace's simulators so a figure can
+# be checked under deuteranopia / protanopia / tritanopia or in greyscale. Only
+# the condition (and replicate) palette is simulated; viridis time fills and
+# the fixed greys are not, and every simulated figure says so in its caption.
+# =============================================================================
+simulate_cvd <- function(cols, mode = "none") {
+  if (is.null(mode) || identical(mode, "none") || length(cols) == 0) return(cols)
+  if (!requireNamespace("colorspace", quietly = TRUE)) return(cols)
+  f <- switch(mode, deutan = colorspace::deutan, protan = colorspace::protan,
+              tritan = colorspace::tritan, grey = colorspace::desaturate, NULL)
+  if (is.null(f)) return(cols)
+  out <- f(as.character(cols))
+  names(out) <- names(cols)
+  out
+}
+cvd_label <- function(mode) {
+  switch(mode %||% "none", deutan = "deuteranopia", protan = "protanopia",
+         tritan = "tritanopia", grey = "greyscale", NULL)
+}
+
 
 # =============================================================================
 # FLEXIBLE GROUPING + STATISTICS HELPERS (v2.6-flexstats)
@@ -469,7 +641,8 @@ min_wilcox_p <- function(n1, n2) {
 compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
                               test = "welch", correction = "holm",
                               label_style = "stars", show_ns = TRUE,
-                              y_lookup = NULL, max_brackets = 12, max_per_time = 4) {
+                              y_lookup = NULL, max_brackets = 12, max_per_time = 4,
+                              unit_label = NULL) {
   sig_annot <- data.frame(Time_min = numeric(), y_pos = numeric(), p_raw = numeric(),
                           Cond1 = character(), Cond2 = character(), stringsAsFactors = FALSE)
   underpowered <- FALSE
@@ -537,7 +710,9 @@ compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
   test_name <- if (test == "wilcox") "Wilcoxon rank-sum" else "Welch's t-test"
   corr_name <- switch(if (is.null(correction)) "holm" else correction,
     "holm" = "Holm", "BH" = "Benjamini-Hochberg", "bonferroni" = "Bonferroni", "none" = "uncorrected", correction)
-  unit_label <- if (sig_yvar == "mean_val") "replicate means" else "replicate medians"
+  # The caption names what was tested; callers testing something other than a
+  # median or mean (the Thresholds tab tests per-dish fractions) say so here.
+  unit_label <- unit_label %||% (if (sig_yvar == "mean_val") "replicate means" else "replicate medians")
   caption <- paste0(test_name, " on ", unit_label,
     if (corr_name == "uncorrected") ", uncorrected"
     else paste0(", ", corr_name, "-corrected across all ", n_family,
@@ -1609,6 +1784,13 @@ apply_custom_labs <- function(p, input, prefix) {
     if (!is.null(p$labels$colour)) p <- p + labs(color = lg)
   }
   cap <- get_txt("_custom_caption");  if (!is.null(cap)) p <- p + labs(caption = cap)
+  # A colour-vision simulation must never pass as the real palette: stamp it.
+  cvd <- cvd_label(input$cvd_preview)
+  if (!is.null(cvd)) {
+    prev <- p$labels$caption
+    p <- p + labs(caption = paste0(if (!is.null(prev) && nzchar(prev)) paste0(prev, " ") else "",
+                                   "Colours simulated for ", cvd, " (preview, not the chosen palette)."))
+  }
   # Fold long text so it never runs past the figure edge (auto or custom alike)
   p$labels$title    <- wrap_plot_text(p$labels$title,    width = 70)
   p$labels$subtitle <- wrap_plot_text(p$labels$subtitle, width = 105)
@@ -1890,11 +2072,13 @@ ui <- page_navbar(
               tags$div(class = "hero-card card p-3",
                 tags$h6(icon("upload", style = "color:#4FC3F7;"), " Upload Data"),
                 fileInput("file", NULL, accept = c(".xlsx", ".xls", ".csv", ".tsv"),
-                          placeholder = "Excel or CSV", width = "100%"),
+                          placeholder = "Excel or CSV (one or several)", width = "100%", multiple = TRUE),
                 tags$p(class = "small", style = "color:#8888a8;",
                   "Upload .xlsx, .xls, .csv, or .tsv files with columns: ",
                   tags$code("Condition"), ", ", tags$code("Time_min"), ", ",
-                  tags$code("Replicate"), " + measurement columns")
+                  tags$code("Replicate"), " + measurement columns. ",
+                  "Select several files (one per image, dish or condition) to stack them: a ",
+                  tags$code("Source_File"), " column is added that you can map to Condition or Replicate.")
               ),
               tags$div(class = "hero-card card p-3",
                 tags$h6(icon("play-circle", style = "color:#81C784;"), " Demo Data"),
@@ -2007,7 +2191,7 @@ ui <- page_navbar(
           tags$p(class = "small mt-1", style = "color:#8888a8;", "Save data + settings to resume later."),
           tags$hr(),
           fileInput("file_replace", "Upload New Data",
-            accept = c(".xlsx", ".xls", ".csv", ".tsv"), placeholder = "Replace current data"),
+            accept = c(".xlsx", ".xls", ".csv", ".tsv"), placeholder = "Replace current data", multiple = TRUE),
           actionButton("load_demo_again", "Load Demo Data",
             class = "btn-outline-secondary btn-sm w-100", icon = icon("flask"))
         ),
@@ -2183,6 +2367,15 @@ ui <- page_navbar(
         width = 300, title = "Trajectory Options",
         radioButtons("traj_summary", "Summary Statistic",
                      choices = c("Median" = "median_val", "Mean" = "mean_val"), selected = "median_val"),
+        radioButtons("traj_normalise", "Normalise each replicate to its own baseline",
+                     choices = c("No (raw values)" = "none",
+                                 "Fold change vs first timepoint" = "fold",
+                                 "Difference vs first timepoint" = "diff"),
+                     selected = "none"),
+        conditionalPanel("input.traj_normalise == 'fold'",
+          checkboxInput("traj_log_y", "Log scale Y axis (fold change)", FALSE)),
+        tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+          "Each dish is divided by (or has subtracted) its own value at the earliest timepoint, so every curve starts at 1 (or 0). Presentation only: the Statistics tab keeps using raw values."),
         checkboxInput("traj_smooth", "Add trend line (loess)", TRUE),
         checkboxInput("traj_error", "Show error band / bars", TRUE),
         conditionalPanel("input.traj_error",
@@ -2213,11 +2406,76 @@ ui <- page_navbar(
           tags$h6("Understanding Trajectory Plots"),
           tags$p(tags$strong("Each point"), " is the median (or mean) of one biological replicate."),
           tags$p(tags$strong("Diverging lines"), " between conditions = Condition x Time interaction."),
+          tags$p(tags$strong("Normalise to baseline"), " divides (fold change) or subtracts (difference) each replicate's own value at the earliest timepoint, per condition. It removes dish-to-dish differences in starting size so the time course itself is easier to compare; the subtitle says when it is on, and any dish without a baseline measurement is dropped and named. The band / bars are then computed on the normalised values. The Statistics and Effect Sizes tabs are not affected."),
           tags$p(tags$strong("Error band / bars"), " are computed from the replicate-level summaries, never from cells: ",
                  tags$strong("SD"), " is the dish-to-dish spread of the replicate values; ",
                  tags$strong("SEM"), " is that SD divided by the square root of the number of replicates in the group; ",
                  tags$strong("95% CI"), " is the t-based interval on the replicate values (undefined with one replicate). ",
                  "The subtitle always names the one being drawn and the number of replicates per group.")
+        ))
+      )
+    )
+  ),
+
+  # === TAB 3b: THRESHOLDS (fraction of cells beyond a cut-off) =================
+  nav_panel(
+    title = "Thresholds",
+    icon  = icon("percent"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 300, title = "Fraction of Cells Beyond a Threshold",
+        radioButtons("frac_mode", "Threshold defined as",
+          choices = c("Multiple of the reference baseline median" = "multiple",
+                      "Absolute value (raw units)" = "absolute"),
+          selected = "multiple"),
+        conditionalPanel("input.frac_mode == 'multiple'",
+          numericInput("frac_multiple", "Multiple of the reference median", 2, 0.1, 100, 0.1)),
+        conditionalPanel("input.frac_mode == 'absolute'",
+          numericInput("frac_absolute", "Threshold value", NA, step = 0.1)),
+        radioButtons("frac_direction", "Count cells",
+          choices = c("Above the threshold" = "above", "Below the threshold" = "below"),
+          selected = "above", inline = TRUE),
+        uiOutput("frac_threshold_txt"),
+        tags$p(class = "small text-muted", style = "font-size:10px;",
+          "Computed on raw (untransformed) values: a threshold is a statement about the measurement, not about its log."),
+        tags$hr(),
+        checkboxInput("frac_error", "Show error bars", TRUE),
+        conditionalPanel("input.frac_error",
+          radioButtons("frac_error_type", "Error bars show",
+            choices = c("SEM" = "sem", "SD" = "sd", "95% CI" = "ci95"), selected = "sem", inline = TRUE)),
+        tags$hr(),
+        tags$p(tags$strong("Significance Brackets"), class = "mb-1"),
+        checkboxInput("frac_show_sig", "Show significance brackets", FALSE),
+        conditionalPanel("input.frac_show_sig",
+          radioButtons("frac_sig_mode", "Comparison type",
+            choices = c("Each treatment vs control" = "vs_control", "All pairwise (every pair)" = "all_pairwise"),
+            selected = "vs_control"),
+          radioButtons("frac_sig_label", "Label style",
+            choices = c("Stars (*, **, ***)" = "stars", "Stars + p-value" = "stars_p", "p-value only" = "pval"),
+            selected = "stars"),
+          checkboxInput("frac_show_ns", "Show ns brackets", FALSE),
+          tags$div(class = "alert alert-info py-1 px-2 mt-2 small",
+            "Test and correction follow the Statistics tab settings, applied to the per-replicate fractions (N = biological replicates), never to pooled cells.")),
+        tags$hr(),
+        figure_controls_ui("frac", 8, 5),
+        tags$hr(),
+        downloadButton("dl_frac", "Download Figure", class = "btn-primary w-100"),
+        downloadButton("dl_frac_data", "Download Table (CSV)", class = "btn-outline-secondary w-100 mt-2")
+      ),
+      navset_card_tab(
+        nav_panel("Plot",
+          plotOutput("frac_plot", height = "550px", dblclick = "frac_plot_dblclick"),
+          edit_hint_ui()),
+        nav_panel("Table", DTOutput("frac_table")),
+        nav_panel("About", tags$div(class = "p-3 small",
+          tags$h6("Fraction of cells beyond a threshold"),
+          tags$p("The classic phenotype readout for filamentation, enlargement or shrinkage: what share of the cells in each dish is larger (or smaller) than a cut-off? ",
+                 "With the default setting the cut-off is twice the pooled median of the reference condition at its earliest timepoint, so \"filamentous\" means \"at least twice the size of an untreated cell at the start\"."),
+          tags$p(tags$strong("One fraction per dish."), " The percentage is computed within each biological replicate and those per-dish values are what the figure, the error bars and the tests use. ",
+                 "Pooling every cell into one proportion and testing that would count thousands of cells as independent observations: the same pseudoreplication this tool exists to avoid."),
+          tags$p(tags$strong("Tests are crude near 0% or 100%."), " Welch's t-test on three fractions that all sit at 0% or 100% has no variance to work with; read such results as descriptive. The Statistics tab's test and correction settings are used."),
+          tags$p(tags$strong("Raw values."), " The threshold is applied to the untransformed measurement whatever the Data-tab transform is set to, and the sidebar prints the exact value used."),
+          tags$p(tags$strong("Few cells, noisy fraction."), " A dish with 20 cells can only move in 5% steps; check the n_cells column in the Table before trusting a small difference.")
         ))
       )
     )
@@ -2438,6 +2696,28 @@ ui <- page_navbar(
               downloadButton("dl_trend_csv", "Download Trend Table (CSV)", class = "btn-outline-secondary w-100")
             ),
             DTOutput("trend_table")
+          )
+        ),
+        nav_panel("Power",
+          tags$div(class = "p-2",
+            tags$p(class = "small text-muted",
+              "Plans the ", tags$strong("next"), " experiment from this one. For every treatment group the between-replicate SD of the ",
+              "replicate summaries is pooled with the reference group's, and the table gives the dishes per group needed to detect a ",
+              "difference of the size you choose (default: the difference you observed) with the target power, by a two-sample t-test. ",
+              "It does not report the \"observed power\" of the comparison you already ran: that is a function of its p-value and adds nothing to it. ",
+              "Two cautions: the observed difference is only a starting point (choose the smallest difference that would matter biologically), ",
+              "and an SD estimated from three dishes is itself very uncertain, so the table also gives a conservative N planned on the SD's upper 95% bound. ",
+              "It plans for the pairwise within-timepoint comparison (the test behind the figure brackets), not for the repeated-measures model, ",
+              "and it pools the two groups' SDs as if equal, which the Welch test does not assume; that is the usual simplification for planning."),
+            layout_columns(col_widths = c(4, 4, 4),
+              numericInput("power_delta", "Difference to detect (blank = observed; same scale as the table)", NA, step = 0.1),
+              numericInput("power_target", "Target power", 0.8, 0.5, 0.99, 0.05),
+              numericInput("power_alpha", "Alpha", 0.05, 0.001, 0.2, 0.01)
+            ),
+            uiOutput("power_scale_txt"),
+            plotOutput("power_plot", height = "360px"),
+            DTOutput("power_table"),
+            downloadButton("dl_power_csv", "Download Power Table (CSV)", class = "btn-outline-secondary w-100 mt-2")
           )
         ),
         nav_panel("EMM Plot",
@@ -2891,6 +3171,21 @@ server <- function(input, output, session) {
 
   # --- Helper: Save figures ---
   save_figure <- function(file, plot_obj, width, height, dpi, format) {
+    # A colour-vision simulation must never leave the app looking like the real
+    # palette: stamp every export, whichever tab it came from, and warn.
+    cvd <- cvd_label(input$cvd_preview)
+    if (!is.null(cvd)) {
+      stamp <- paste0("Colours simulated for ", cvd, " (preview, not the chosen palette).")
+      if (inherits(plot_obj, "patchwork")) {
+        plot_obj <- plot_obj + patchwork::plot_annotation(caption = stamp)
+      } else if (inherits(plot_obj, "ggplot")) {
+        prev <- plot_obj$labels$caption
+        if (is.null(prev) || !grepl("Colours simulated for", prev))
+          plot_obj <- plot_obj + labs(caption = paste0(if (!is.null(prev) && nzchar(prev)) paste0(prev, " ") else "", stamp))
+      }
+      showNotification(paste0("This figure uses the ", cvd, " preview colours, not your palette. Set \"Preview colours as\" back to Normal vision on the Data tab for the real figure."),
+                       type = "warning", duration = 10)
+    }
     if (format == "tiff") {
       ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "tiff",
              compression = "lzw", bg = "white")
@@ -3126,6 +3421,7 @@ server <- function(input, output, session) {
     editor_map <- list(
       dist_plot_dblclick         = c("dist",  "Distributions"),
       traj_plot_dblclick         = c("traj",  "Trajectories"),
+      frac_plot_dblclick         = c("frac",  "Threshold Fractions"),
       pca_scatter_dblclick       = c("pca",   "Morphospace"),
       clust_composition_dblclick = c("clust", "Phenotype Composition"),
       es_plot_dblclick           = c("es",    "Effect Sizes"),
@@ -3211,9 +3507,9 @@ server <- function(input, output, session) {
   })
 
   # --- Helper: load and validate a data file ---
-  load_data_file <- function(filepath, filename) {
+  read_one_table <- function(filepath, filename) {
     ext <- tolower(tools::file_ext(filename))
-    df <- tryCatch({
+    tryCatch({
       if (ext %in% c("xlsx", "xls")) readxl::read_excel(filepath)
       else if (ext == "csv")  read.csv(filepath, stringsAsFactors = FALSE, check.names = FALSE)
       else if (ext == "tsv")  read.delim(filepath, stringsAsFactors = FALSE, check.names = FALSE)
@@ -3223,11 +3519,32 @@ server <- function(input, output, session) {
                  error = function(e) NULL)
       }
     }, error = function(e) NULL)
+  }
 
-    if (is.null(df) || nrow(df) == 0) {
+  # One file, or several stacked. Several files (one per image, dish or
+  # condition, as segmentation software tends to export) get a Source_File
+  # column holding each file's name without its extension; the usual column
+  # mapping then lets the user assign it to Condition or Replicate. Nothing is
+  # inferred from the file names themselves.
+  load_data_file <- function(filepath, filename) {
+    tables <- Map(read_one_table, filepath, filename)
+    ok <- !vapply(tables, function(t) is.null(t) || nrow(t) == 0, logical(1))
+    if (!any(ok)) {
       showNotification("Could not read the file. Check that it is a valid CSV, TSV, or Excel file.",
                        type = "error", duration = 8)
       return()
+    }
+    if (length(filename) > 1) {
+      if (!all(ok)) showNotification(paste0("Skipped unreadable file(s): ",
+                                            paste(filename[!ok], collapse = ", ")), type = "warning", duration = 8)
+      tables <- tables[ok]
+      stacked <- Map(function(t, nm) { t <- as.data.frame(t); t$Source_File <- tools::file_path_sans_ext(basename(nm)); t },
+                     tables, filename[ok])
+      df <- dplyr::bind_rows(stacked)
+      showNotification(paste0("Stacked ", length(stacked), " files (", format(nrow(df), big.mark = ","),
+                              " rows). A Source_File column was added."), type = "message", duration = 6)
+    } else {
+      df <- tables[[1]]
     }
 
     val <- tryCatch(validate_data(df), error = function(e) {
@@ -3411,6 +3728,11 @@ server <- function(input, output, session) {
     req(measure_cols())
     selectInput("measure", "Measurement Variable", choices = measure_cols(), selected = measure_cols()[1])
   })
+  # Every analysis tab reads input$measure (and the reference condition), but
+  # Shiny does not render a uiOutput that sits inside a collapsed sidebar. A
+  # user who loaded data and went straight to another tab therefore saw empty
+  # panels until they opened the Data sidebar once. Render these regardless.
+  outputOptions(output, "measure_selector", suspendWhenHidden = FALSE)
 
   output$condition_order_ui <- renderUI({
     req(raw_data())
@@ -3421,6 +3743,7 @@ server <- function(input, output, session) {
         idx <- grep("uninf|control|wt|mock", conds, ignore.case = TRUE)
         if (length(idx) > 0) conds[idx[1]] else conds[1] })
   })
+  outputOptions(output, "condition_order_ui", suspendWhenHidden = FALSE)
 
 
   # --- Flexible statistics UI helpers ---
@@ -3690,6 +4013,16 @@ server <- function(input, output, session) {
         choices = c(names(PALETTE_PRESETS), "Custom"), selected = sel_preset),
       tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
         "Okabe-Ito and Tol are distinguishable under the common forms of colour blindness and in greyscale print."),
+      selectInput("cvd_preview", "Preview colours as",
+        choices = c("Normal vision" = "none",
+                    "Deuteranopia (red-green, most common)" = "deutan",
+                    "Protanopia (red-green)" = "protan",
+                    "Tritanopia (blue-yellow)" = "tritan",
+                    "Greyscale print" = "grey"),
+        selected = input$cvd_preview %||% "none"),
+      tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+        "Simulates how the condition colours look to that viewer on every figure; the caption says so. ",
+        "Viridis time fills and fixed greys are not simulated. Set back to Normal vision before exporting."),
       if (has_colourpicker)
         tagList(lapply(seq_along(conds), function(i) {
           cur <- input[[paste0("color_", i)]]
@@ -3723,6 +4056,13 @@ server <- function(input, output, session) {
     # Names matter: several tabs subset this by condition name (e.g. dropping the
     # reference condition), which silently returns nothing on an unnamed vector.
     setNames(as.character(cols), conds)
+  })
+  # The palette the user chose, with the Data-tab colour-vision preview applied.
+  # Everything that draws conditions reads this one; the raw palette above is
+  # used only to decide which colours are free for replicates.
+  cond_colors_raw <- cond_colors
+  cond_colors <- reactive({
+    simulate_cvd(cond_colors_raw(), input$cvd_preview %||% "none")
   })
 
   # Replicate summaries
@@ -3906,7 +4246,8 @@ server <- function(input, output, session) {
     # Replicates take the colourblind-safe colours the conditions are not using.
     # Chosen against the FULL condition palette, not the filtered one, so a
     # replicate keeps its colour whichever conditions are shown.
-    rep_cols <- rep_colors_for(levels(df$Rep_fac), cond_colors())
+    rep_cols <- simulate_cvd(rep_colors_for(levels(df$Rep_fac), cond_colors_raw()),
+                             input$cvd_preview %||% "none")
 
     # --- Build base plot ---
     if (input$dist_type == "violin") {
@@ -4529,26 +4870,34 @@ server <- function(input, output, session) {
     req(rep_summ(), cond_summ(), input$traj_summary)
     validate(need(has_time(),
       "This dataset has no time column, so there is no trajectory to plot. Use the Distributions tab to compare samples directly."))
-    rs <- rep_summ(); cs <- cond_summ(); cols <- cond_colors(); yvar <- input$traj_summary
+    td <- traj_data(); rs <- td$rs; cs <- td$cs; cols <- cond_colors(); yvar <- input$traj_summary
+    validate(need(nrow(rs) > 0 && nrow(cs) > 0,
+      "Every replicate was dropped: none has a measurement at the earliest timepoint to normalise to."))
     mlbl <- measure_label(); mttl <- measure_title()
-    ylab <- if (yvar == "median_val") paste("Median", mlbl, "per Replicate") else paste("Mean", mlbl, "per Replicate")
+    if (isTRUE(td$on_raw)) { mlbl <- paste0(input$measure, if (nzchar(measure_unit_now())) paste0(" (", measure_unit_now(), ")") else ""); mttl <- input$measure }
     stat_word <- if (yvar == "median_val") "medians" else "means"
+    stat_sing <- sub("s$", "", stat_word)
+    norm_mode <- td$mode
+    # A fold change is dimensionless, so that axis carries no unit; a difference
+    # keeps the measurement's unit.
+    ylab <- switch(norm_mode,
+      fold = paste0("Fold change in ", stat_sing, " ", mttl, " vs ", fmt_time(td$t0)),
+      diff = paste0("Change in ", stat_sing, " ", mlbl, " vs ", fmt_time(td$t0)),
+      if (yvar == "median_val") paste("Median", mlbl, "per Replicate") else paste("Mean", mlbl, "per Replicate"))
 
     # Which spread the band / bars show. All three are computed across dishes in
     # compute_condition_summaries(); the subtitle names the one drawn. (Until
     # 3.3.0 the only choice was SEM, and with the trend line on, the "SEM" box
     # silently drew loess's own confidence band instead.)
-    show_err <- isTRUE(input$traj_error)
-    err_kind <- if (show_err) (input$traj_error_type %||% "sem") else NULL
-    cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
-    cs$err  <- if (show_err) cs[[paste0(err_kind, "_", ifelse(yvar == "median_val", "median", "mean"))]] else NA_real_
+    show_err <- !is.null(td$err_kind)
+    err_kind <- td$err_kind
+    cs_err <- cs[is.finite(cs$lo) & is.finite(cs$hi), , drop = FALSE]
     use_ribbon <- show_err && input$traj_style == "ribbon"
     use_bars   <- show_err && input$traj_style == "pointline"
 
     p <- ggplot()
     if (use_ribbon) {
-      p <- p + geom_ribbon(data = cs[is.finite(cs$err), , drop = FALSE],
-                           aes(x = Time_min, ymin = yvar - err, ymax = yvar + err, fill = Condition), alpha = 0.2) +
+      p <- p + geom_ribbon(data = cs_err, aes(x = Time_min, ymin = lo, ymax = hi, fill = Condition), alpha = 0.2) +
         scale_fill_manual(values = cols)
     }
     traj_pt_sz <- input$traj_point_size %||% 3
@@ -4564,23 +4913,67 @@ server <- function(input, output, session) {
       else p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "lm", se = FALSE, linewidth = traj_ln_w)
     }
     if (use_bars) {
-      p <- p + geom_errorbar(data = cs[is.finite(cs$err), , drop = FALSE],
-                             aes(x = Time_min, ymin = yvar - err, ymax = yvar + err, color = Condition), width = 3, linewidth = 0.6)
+      p <- p + geom_errorbar(data = cs_err, aes(x = Time_min, ymin = lo, ymax = hi, color = Condition), width = 3, linewidth = 0.6)
     }
 
     # Subtitle: every mark on the figure is named, with the real replicate count.
     n_rng <- range(cs$n_reps, na.rm = TRUE)
     n_txt <- if (n_rng[1] == n_rng[2]) n_rng[1] else paste0(n_rng[1], "-", n_rng[2])
-    parts <- paste0("Each point = one replicate ", sub("s$", "", stat_word), " (N = ", n_txt, " per group)")
+    parts <- paste0("Each point = one replicate ", stat_sing, " (N = ", n_txt, " per group)")
+    err_what <- if (norm_mode == "fold")
+      paste0(error_measure_label(err_kind %||% "sem"), " of log2 fold changes, back-transformed (geometric)")
+      else paste0(error_measure_label(err_kind %||% "sem"), " of replicate ", stat_word)
+    if (norm_mode != "none") {
+      parts <- c(parts, paste0(if (norm_mode == "fold") "fold change" else "difference",
+                               " vs each replicate's own ", fmt_time(td$t0), " value"))
+      if (isTRUE(td$on_raw)) parts <- c(parts, "computed on untransformed values")
+      if (length(td$dropped) > 0)
+        parts <- c(parts, paste0("dropped (no baseline): ", paste(td$dropped, collapse = ", ")))
+      if (isTRUE(td$nonpos > 0))
+        parts <- c(parts, paste0(td$nonpos, " non-positive fold change(s) plotted but excluded from the geometric summary"))
+    }
     if (input$traj_connect_reps) parts <- c(parts, "dashed lines connect replicates")
     if (input$traj_smooth) parts <- c(parts, "solid line = trend")
-    if (use_ribbon) parts <- c(parts, paste0("band = ", error_measure_label(err_kind), " of replicate ", stat_word))
-    if (use_bars)   parts <- c(parts, paste0("bars = ", error_measure_label(err_kind), " of replicate ", stat_word))
+    if (use_ribbon) parts <- c(parts, paste0("band = ", err_what))
+    if (use_bars)   parts <- c(parts, paste0("bars = ", err_what))
     p <- p + scale_color_manual(values = cols) + scale_x_continuous(breaks = sort(unique(rs$Time_min))) +
       labs(x = "Time Post-Infection (min)", y = ylab, title = paste(mttl, "Trajectory Over Time"),
            subtitle = paste(parts, collapse = "; ")) +
       get_theme(input, "traj")
+    if (norm_mode == "fold") {
+      p <- p + geom_hline(yintercept = 1, linetype = "dotted", color = "grey50")
+      if (isTRUE(input$traj_log_y)) p <- p + scale_y_log10()
+    } else if (norm_mode == "diff") {
+      p <- p + geom_hline(yintercept = 0, linetype = "dotted", color = "grey50")
+    }
     apply_custom_labs(p, input, "traj")
+  })
+
+  # Replicate and condition summaries as the Trajectories figure draws them:
+  # raw, or normalised to each replicate's own baseline. Shared by the figure
+  # and its CSV so the two can never disagree.
+  traj_data <- reactive({
+    req(rep_summ(), input$traj_summary, input$measure)
+    yvar <- input$traj_summary
+    mode <- if (isTRUE(has_time())) (input$traj_normalise %||% "none") else "none"
+    # Normalisation is a statement about the measurement, not its transform: a
+    # ratio of log values is not a fold change. So when it is on, the replicate
+    # summaries are recomputed from the UNTRANSFORMED data, whatever the Data
+    # tab's transform is set to, and the subtitle says so.
+    transform_active <- (input$data_transform %||% "none") != "none"
+    src <- if (mode != "none" && transform_active) {
+      m <- input$measure; df <- plot_data(); req(m %in% names(df))
+      df$Time_min <- suppressWarnings(as.numeric(df$Time_min))
+      tryCatch(compute_replicate_summaries(df, m), error = function(e) NULL)
+    } else rep_summ()
+    req(!is.null(src))
+    norm <- normalise_to_baseline(src, yvar, mode)
+    rs <- norm$rs
+    nonpos <- if (mode == "fold") sum(!is.finite(rs[[yvar]]) | rs[[yvar]] <= 0) else 0L
+    err_kind <- if (isTRUE(input$traj_error)) (input$traj_error_type %||% "sem") else NULL
+    cs <- summarise_trajectory(rs, yvar, mode, err_kind)
+    list(rs = rs, cs = cs, mode = mode, dropped = norm$dropped, t0 = norm$t0, err_kind = err_kind,
+         on_raw = mode != "none" && transform_active, nonpos = nonpos)
   })
 
   output$traj_plot <- renderPlot({ traj_plot_obj() })
@@ -4590,14 +4983,244 @@ server <- function(input, output, session) {
   # Replicate summaries joined to the condition summaries (grand mean / median,
   # SD, SEM, 95% CI, N) -- everything the trajectory figure is drawn from.
   traj_plot_data <- reactive({
-    rs <- rep_summ(); cs <- cond_summ()
+    td <- traj_data(); rs <- td$rs; cs <- td$cs
     req(!is.null(rs), !is.null(cs))
     out <- dplyr::left_join(as.data.frame(rs), as.data.frame(cs), by = c("Condition", "Time_min"))
-    cbind(Measurement = measure_label(), out)
+    cbind(Measurement = measure_label(),
+          Normalisation = switch(td$mode, fold = paste0("fold change vs own value at ", td$t0),
+                                 diff = paste0("difference vs own value at ", td$t0), "none"),
+          Error_Shown = td$err_kind %||% "none",
+          Values = if (isTRUE(td$on_raw)) "untransformed" else (input$data_transform %||% "none"),
+          out)
   })
   output$dl_traj_data <- downloadHandler(
     filename = function() paste0("trajectory_", input$measure, "_plot_data.csv"),
     content  = function(file) write.csv(traj_plot_data(), file, row.names = FALSE))
+
+  # === THRESHOLDS TAB ===
+  frac_threshold <- reactive({
+    req(plot_data(), input$measure)
+    df <- plot_data(); m <- input$measure
+    req(m %in% names(df))
+    mode <- input$frac_mode %||% "multiple"
+    val  <- if (mode == "absolute") input$frac_absolute else (input$frac_multiple %||% 2)
+    validate(need(!is.null(val) && is.finite(val), "Enter a threshold value in the sidebar."))
+    threshold_value(df, m, mode, val, input$ref_condition)
+  })
+  frac_summ <- reactive({
+    thr <- frac_threshold(); df <- plot_data(); m <- input$measure
+    validate(need(is.finite(thr$threshold), "The threshold could not be computed (no reference cells at the baseline timepoint)."))
+    compute_fraction_summaries(df, m, thr$threshold, input$frac_direction %||% "above")
+  })
+  frac_cond_summ <- reactive({
+    rs <- frac_summ(); rs$median_val <- rs$frac_val; rs$mean_val <- rs$frac_val
+    compute_condition_summaries(rs)
+  })
+  output$frac_threshold_txt <- renderUI({
+    thr <- frac_threshold(); m <- input$measure
+    basis <- if (thr$mode == "absolute") "set directly"
+      else paste0(thr$multiple, " x the pooled median of ", thr$ref,
+                  if (isTRUE(has_time())) paste0(" at ", fmt_time(thr$t0)) else "",
+                  " (", signif(thr$base, 4), ")")
+    tags$p(class = "small mb-1", tags$strong("Threshold: "), m, " ",
+           if ((input$frac_direction %||% "above") == "above") ">" else "<", " ",
+           tags$strong(signif(thr$threshold, 4)), tags$br(), tags$span(class = "text-muted", basis))
+  })
+
+  frac_plot_obj <- reactive({
+    rs <- frac_summ(); cs <- frac_cond_summ(); thr <- frac_threshold()
+    cols <- cond_colors(); m <- input$measure; dir_word <- if ((input$frac_direction %||% "above") == "above") "above" else "below"
+    req(nrow(rs) > 0)
+    rs$Condition <- factor(as.character(rs$Condition), levels = levels(plot_data()$Condition))
+    rs$Condition <- droplevels(rs$Condition)
+    cs$Condition <- factor(as.character(cs$Condition), levels = levels(rs$Condition))
+    cond_levels <- levels(rs$Condition)
+    times <- sort(unique(rs$Time_min))
+    rs$Time_fac <- factor(fmt_time(rs$Time_min), levels = fmt_time(times))
+    cs$Time_fac <- factor(fmt_time(cs$Time_min), levels = fmt_time(times))
+    rs$Rep_fac  <- factor(rs$Replicate)
+    x_is_cond <- !isTRUE(has_time())
+    rs$x_var <- if (x_is_cond) rs$Condition else rs$Time_fac
+    cs$x_var <- if (x_is_cond) cs$Condition else cs$Time_fac
+    x_levels <- levels(rs$x_var)
+    dodge_w <- if (x_is_cond) 0 else 0.8
+    pd <- if (x_is_cond) position_identity() else position_dodge(dodge_w)
+
+    show_err <- isTRUE(input$frac_error)
+    err_kind <- if (show_err) (input$frac_error_type %||% "sem") else NULL
+    cs$err <- if (show_err) cs[[paste0(err_kind, "_mean")]] else NA_real_
+    # A t-interval on three percentages near 0 or 100 can run past the possible
+    # range; draw it clipped to [0, 100] and say so.
+    cs$lo <- pmax(cs$grand_mean - cs$err, 0); cs$hi <- pmin(cs$grand_mean + cs$err, 100)
+    clipped <- show_err && any(is.finite(cs$err) & (cs$grand_mean - cs$err < 0 | cs$grand_mean + cs$err > 100))
+
+    p <- ggplot() +
+      stat_summary(data = rs, aes(x = x_var, y = frac_val, group = Condition), fun = mean,
+                   geom = "crossbar", position = pd, width = if (x_is_cond) 0.5 else 0.6,
+                   linewidth = 0.5, color = "black", alpha = 0.6)
+    if (show_err) {
+      p <- p + geom_errorbar(data = cs[is.finite(cs$err), , drop = FALSE],
+                             aes(x = x_var, ymin = lo, ymax = hi, group = Condition),
+                             position = pd, width = if (x_is_cond) 0.3 else 0.35, linewidth = 0.5, color = "grey20")
+    }
+    p <- p + geom_point(data = rs, aes(x = x_var, y = frac_val, fill = Condition, group = Condition, shape = Rep_fac),
+                        position = if (x_is_cond) position_jitter(width = 0.08, height = 0, seed = 1) else position_jitterdodge(jitter.width = 0.15, dodge.width = dodge_w, seed = 1),
+                        size = 3.2, color = "black", stroke = 0.7, alpha = 0.9) +
+      scale_fill_manual(values = cols, name = "Condition") +
+      scale_shape_manual(values = rep_len(DEFAULT_REP_SHAPES, nlevels(rs$Rep_fac)), name = "Replicate") +
+      guides(fill = guide_legend(override.aes = list(shape = 21, size = 3.5)))
+
+    # --- Significance brackets on the per-dish fractions -----------------------
+    sig_ymax <- NA_real_
+    if (isTRUE(input$frac_show_sig) && length(cond_levels) >= 2) {
+      ref_cond <- input$ref_condition %||% cond_levels[1]
+      if (!ref_cond %in% cond_levels) ref_cond <- cond_levels[1]
+      pairs_list <- if ((input$frac_sig_mode %||% "vs_control") == "all_pairwise") combn(cond_levels, 2, simplify = FALSE)
+                    else lapply(setdiff(cond_levels, ref_cond), function(trt) c(ref_cond, trt))
+      y_range <- diff(range(rs$frac_val, na.rm = TRUE)); if (!is.finite(y_range) || y_range == 0) y_range <- 10
+      sig_res <- compute_sig_table(rs, pairs_list, times = times, sig_yvar = "frac_val",
+        test = input$stat_test %||% "welch", correction = input$stat_p_adjust %||% "holm",
+        label_style = input$frac_sig_label %||% "stars", show_ns = isTRUE(input$frac_show_ns),
+        unit_label = paste0("per-replicate percentages of cells ", dir_word, " the threshold"))
+      sa <- sig_res$annot
+      if (nrow(sa) > 0) {
+        sa$Time_fac <- fmt_time(sa$Time_min)
+        n_levels <- length(cond_levels)
+        bracket_base <- sa$y_pos + y_range * 0.06
+        bracket_step <- y_range * (if ((input$frac_sig_label %||% "stars") == "stars_p") 0.17 else 0.10)
+        for (tf in unique(sa$Time_fac)) {
+          idx <- which(sa$Time_fac == tf)
+          if (length(idx) > 1) for (j in 2:length(idx)) bracket_base[idx[j]] <- bracket_base[idx[j - 1]] + bracket_step
+        }
+        for (k in seq_len(nrow(sa))) {
+          c1 <- which(cond_levels == sa$Cond1[k]) - 1; c2 <- which(cond_levels == sa$Cond2[k]) - 1
+          if (x_is_cond) { x_left <- c1 + 1; x_right <- c2 + 1 }
+          else {
+            xc <- which(x_levels == sa$Time_fac[k])
+            if (n_levels == 2) { x_left <- xc - dodge_w / 4; x_right <- xc + dodge_w / 4 }
+            else { x_left <- xc + (c1 - (n_levels - 1) / 2) * dodge_w / n_levels
+                   x_right <- xc + (c2 - (n_levels - 1) / 2) * dodge_w / n_levels }
+          }
+          if (x_left > x_right) { tmp <- x_left; x_left <- x_right; x_right <- tmp }
+          y_bar <- bracket_base[k]; y_tick <- y_bar - y_range * 0.015
+          bc <- if (sa$stars[k] == "ns") "grey60" else "black"
+          p <- p + annotate("segment", x = x_left, xend = x_left, y = y_tick, yend = y_bar, linewidth = 0.4, color = bc) +
+            annotate("segment", x = x_left, xend = x_right, y = y_bar, yend = y_bar, linewidth = 0.4, color = bc) +
+            annotate("segment", x = x_right, xend = x_right, y = y_tick, yend = y_bar, linewidth = 0.4, color = bc) +
+            annotate("text", x = (x_left + x_right) / 2, y = y_bar + y_range * 0.015, label = sa$label[k],
+                     size = (input$frac_base_size %||% 12) / 2.8, vjust = 0, color = bc,
+                     fontface = if (sa$stars[k] != "ns") "bold" else "plain")
+        }
+        sig_ymax <- max(bracket_base) + y_range * (if ((input$frac_sig_label %||% "stars") == "stars_p") 0.20 else 0.12)
+      }
+      p <- p + labs(caption = paste0(sig_res$caption, bracket_family_note() %||% ""))
+    }
+    if (is.finite(sig_ymax)) p <- p + coord_cartesian(ylim = c(NA, sig_ymax), clip = "off")
+
+    n_rng <- range(cs$n_reps, na.rm = TRUE)
+    n_txt <- if (n_rng[1] == n_rng[2]) n_rng[1] else paste0(n_rng[1], "-", n_rng[2])
+    thr_txt <- paste0(m, " ", if (dir_word == "above") ">" else "<", " ", signif(thr$threshold, 4),
+                      if (thr$mode == "multiple") paste0(" (", thr$multiple, " x ", thr$ref, " baseline median)") else "")
+    parts <- c(paste0("Threshold: ", thr_txt),
+               paste0("each point = one replicate (N = ", n_txt, " per group); bar = mean of replicates"))
+    if (show_err) parts <- c(parts, paste0("error bars = ", error_measure_label(err_kind), " across replicates",
+                                           if (clipped) ", clipped to 0-100%" else ""))
+    p <- p + labs(x = if (x_is_cond) "Sample" else "Time Post-Infection",
+                  y = paste0("% of cells ", dir_word, " threshold"),
+                  title = paste0("Fraction of Cells ", tools::toTitleCase(dir_word), " Threshold -- ", measure_title()),
+                  subtitle = paste(parts, collapse = "; ")) +
+      get_theme(input, "frac") +
+      theme(axis.text.x = element_text(angle = if (x_is_cond) 30 else 0, hjust = if (x_is_cond) 1 else 0.5))
+    if (x_is_cond) p <- p + guides(fill = "none")
+    apply_custom_labs(p, input, "frac")
+  })
+  output$frac_plot <- renderPlot({ frac_plot_obj() })
+  output$dl_frac <- downloadHandler(
+    filename = function() paste0("threshold_fraction_", input$measure, ".", fmt_ext(input$frac_format)),
+    content  = function(file) save_figure(file, frac_plot_obj(), input$frac_width, input$frac_height, input$frac_dpi, input$frac_format))
+  frac_table_data <- reactive({
+    rs <- frac_summ(); cs <- frac_cond_summ(); thr <- frac_threshold()
+    out <- dplyr::left_join(as.data.frame(rs),
+                            as.data.frame(cs)[, c("Condition", "Time_min", "grand_mean", "sd_mean", "sem_mean", "ci95_mean", "n_reps")],
+                            by = c("Condition", "Time_min"))
+    names(out)[names(out) == "frac_val"]   <- "Pct_Cells"
+    names(out)[names(out) == "grand_mean"] <- "Group_Mean_Pct"
+    names(out)[names(out) == "sd_mean"]    <- "SD_Across_Reps"
+    names(out)[names(out) == "sem_mean"]   <- "SEM_Across_Reps"
+    names(out)[names(out) == "ci95_mean"]  <- "CI95_Halfwidth"
+    cbind(Measurement = input$measure, Direction = input$frac_direction %||% "above",
+          Threshold = signif(thr$threshold, 6), out)
+  })
+  output$frac_table <- renderDT({
+    d <- frac_table_data()
+    num <- vapply(d, is.numeric, logical(1))
+    d[num] <- lapply(d[num], function(x) round(x, 3))
+    datatable(d, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE,
+              caption = "One row per biological replicate; group columns repeat the across-replicate summary.")
+  })
+  output$dl_frac_data <- downloadHandler(
+    filename = function() paste0("threshold_fraction_", input$measure, ".csv"),
+    content  = function(file) write.csv(frac_table_data(), file, row.names = FALSE))
+
+  # === STATISTICS TAB: POWER PLANNER ===
+  power_plan <- reactive({
+    req(rep_summ())
+    rs <- rep_summ()
+    ref <- input$ref_condition %||% levels(plot_data()$Condition)[1]
+    yvar <- input$stat_summary %||% "median_val"
+    delta <- input$power_delta
+    if (is.null(delta) || is.na(delta)) delta <- NULL
+    plan_replicates(rs, ref, yvar, delta = delta,
+                    power = input$power_target %||% 0.8, sig_level = input$power_alpha %||% 0.05)
+  })
+  output$power_scale_txt <- renderUI({
+    req(input$measure)
+    tags$p(class = "small text-muted mb-1",
+      tags$strong("Scale: "), "differences and SDs below are in the units of ", tags$code(measure_label()),
+      if ((input$data_transform %||% "none") != "none") " -- the Data-tab transform is applied, as it is on the Statistics tab." else ".",
+      " Replicate summaries: ", if ((input$stat_summary %||% "median_val") == "median_val") "medians" else "means", ".")
+  })
+  output$power_table <- renderDT({
+    d <- power_plan()
+    validate(need(nrow(d) > 0, "No treatment groups to plan for: pick a reference condition on the Data tab."))
+    d$Time <- fmt_time(d$Time_min); d$Time_min <- NULL
+    d <- d[, c("Condition", "Time", setdiff(names(d), c("Condition", "Time")))]
+    num <- vapply(d, is.numeric, logical(1))
+    d[num] <- lapply(d[num], function(x) round(x, 3))
+    # A near-zero target difference (typically the observed difference at the
+    # baseline timepoint) needs thousands of dishes: say "more than 1000" rather
+    # than print a number nobody will act on. The CSV keeps the exact value.
+    for (col in c("Replicates_Needed_Per_Group", "Replicates_Needed_Conservative"))
+      d[[col]] <- ifelse(is.na(d[[col]]), NA, ifelse(d[[col]] > 1000, ">1000", as.character(d[[col]])))
+    datatable(d, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE,
+              caption = paste0("Dishes per group for ", round(100 * (input$power_target %||% 0.8)), "% power at alpha = ",
+                               input$power_alpha %||% 0.05, ", two-sample t-test on replicate ",
+                               if ((input$stat_summary %||% "median_val") == "median_val") "medians" else "means",
+                               ". 'Conservative' plans on the upper 95% bound of the between-replicate SD (chi-square, SD_df degrees of freedom)."))
+  })
+  power_plot_obj <- reactive({
+    plan <- power_plan(); req(nrow(plan) > 0)
+    curve <- plan_power_curve(plan, n_range = 2:12, sig_level = input$power_alpha %||% 0.05)
+    curve <- curve[is.finite(curve$Power), , drop = FALSE]
+    validate(need(nrow(curve) > 0, "Power cannot be computed: the between-replicate SD is zero or undefined (need at least 2 replicates in a group)."))
+    curve$Time_fac <- factor(fmt_time(curve$Time_min), levels = fmt_time(sort(unique(curve$Time_min))))
+    cols <- cond_colors()
+    p <- ggplot(curve, aes(x = N, y = Power, color = Condition)) +
+      geom_hline(yintercept = input$power_target %||% 0.8, linetype = "dashed", color = "grey50") +
+      geom_line(linewidth = 1) + geom_point(size = 2) +
+      scale_color_manual(values = cols) +
+      scale_x_continuous(breaks = 2:12) + scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+      labs(x = "Biological replicates per group", y = "Power to detect the target difference",
+           title = "Replicates needed for the next experiment",
+           subtitle = "Two-sample t-test; between-replicate SD pooled from this dataset; dashed line = target power") +
+      theme_publication(input$stat_base_size %||% 12)
+    if (isTRUE(has_time())) p <- p + facet_wrap(~ Time_fac)
+    p
+  })
+  output$power_plot <- renderPlot({ power_plot_obj() })
+  output$dl_power_csv <- downloadHandler(
+    filename = function() paste0("replicate_power_plan_", input$measure, ".csv"),
+    content  = function(file) write.csv(power_plan(), file, row.names = FALSE))
 
   # === STATISTICS TAB ===
   stat_results <- reactiveVal(NULL)
@@ -6164,9 +6787,11 @@ server <- function(input, output, session) {
     }
     # guides = "collect" lifts the single kept legend out of its panel and into
     # one shared legend under the whole figure, so it cannot overflow a panel.
+    cvd <- cvd_label(input$cvd_preview)
     patchwork::wrap_plots(labeled, ncol = if (n_panels == 1) 1 else 2, guides = "collect") +
       patchwork::plot_annotation(
         title = pub_title,
+        caption = if (!is.null(cvd)) paste0("Colours simulated for ", cvd, " (preview, not the chosen palette).") else NULL,
         theme = theme_publication(base) +
           theme(legend.position = "bottom", legend.box = "horizontal",
                 legend.justification = "center"))

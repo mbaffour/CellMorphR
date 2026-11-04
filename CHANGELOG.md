@@ -4,6 +4,84 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.4.0 — 2026-11-04
+
+**Analysis and data release.** Three new analyses, all built on per-replicate
+summaries like everything else in the app, one new way to look at trajectories,
+a colour-vision preview, and multi-file import. Nothing in the existing
+Statistics, Effect Sizes or pairwise pipelines changes; figures from 3.3.0 are
+reproduced exactly unless the new options are switched on.
+
+### Added — analysis
+
+- **Thresholds tab: fraction of cells beyond a cut-off.** The filamentation
+  readout. For every dish, the percentage of cells whose raw measurement is
+  above (or below) a threshold, defined either as a multiple of the reference
+  condition's pooled baseline median (default 2×) or as an absolute value. The
+  per-dish percentages are then treated as replicate summaries: mean across
+  dishes, SD / SEM / 95% CI across dishes, Welch (or Wilcoxon) tests across
+  dishes with the Statistics tab's correction and one stated family. Pooling
+  every cell into one proportion is deliberately not offered. Intervals are
+  drawn clipped to 0–100% and the subtitle says when clipping happened; the
+  About text warns that a t-test on three percentages at 0% or 100% is crude.
+  Works with and without a time column. Table and CSV export.
+- **Statistics tab > Power: replicate planner.** Plans the *next* experiment.
+  For each treatment group the between-replicate SD is pooled with the
+  reference group's and the table gives the dishes per group needed to detect
+  a chosen difference (default: the observed one) at the target power with a
+  two-sample t-test, plus a power-versus-N curve. Because an SD from three
+  dishes is itself uncertain, a second, conservative N is planned on the SD's
+  upper 95% chi-square bound. Deliberately **not** "observed power" of the
+  comparison already run, which is a function of its p-value. Counts above
+  1000 are shown as ">1000" (the CSV keeps the number). The panel states its
+  scale (the Data-tab transform applies, as on the Statistics tab), that it
+  plans for the pairwise within-timepoint test, and that it pools SDs as equal.
+- `compute_sig_table()` takes a `unit_label` so its caption can name what was
+  tested ("per-replicate percentages of cells above the threshold").
+
+### Added — plotting
+
+- **Trajectories: normalise each replicate to its own baseline.** Fold change
+  (÷ its own value at the earliest timepoint) or difference (−), per
+  condition × replicate; dishes without a baseline are dropped and named in the
+  subtitle. Fold changes are ratios, so their centre is the **geometric mean**
+  and the SD / SEM / 95% CI are computed on log2 fold changes and
+  back-transformed, giving the asymmetric interval a ratio deserves; the fold
+  axis carries no unit; optional log-scale Y. Differences and raw values keep
+  the arithmetic summary. The normalisation is always computed on
+  **untransformed** values even when a Data-tab transform is active (a ratio of
+  logs is not a fold change), and the subtitle says so; non-positive fold
+  changes are plotted but excluded from the geometric summary and counted in
+  the subtitle. Presentation only: the Statistics and Effect Sizes tabs, and
+  panel B of the composite figure, keep showing the raw time course. The CSV
+  export records the normalisation, the scale and which spread is shown.
+- **Colour-vision preview** on the Data tab: deuteranopia, protanopia,
+  tritanopia or greyscale, simulated with the `colorspace` package on the
+  condition and replicate palettes. Every figure drawn through the shared
+  label pipeline, the composite, and **every exported file** carry a caption
+  saying so, and the export shows a warning. Viridis time fills and fixed greys
+  are not simulated.
+
+### Added — data
+
+- **Multi-file upload.** Select several CSV/TSV/Excel files (one per image,
+  dish or condition); they are stacked with a `Source_File` column (file name
+  without extension) that the usual column-mapping dialog lets you assign to
+  Condition or Replicate. Nothing is inferred from file names.
+
+### Fixed
+
+- **Empty panels until the Data sidebar was opened.** The measurement and
+  reference-condition selectors are rendered inside the Data sidebar, and Shiny
+  does not render outputs it considers hidden, so a user who loaded data and
+  went straight to another tab saw blank figures until they expanded that
+  sidebar once. Both selectors now render regardless.
+
+### Not done
+
+- The Script Builder does not yet emit the Thresholds analysis, the planner or
+  the baseline normalisation.
+
 ## 3.3.0 — 2026-11-04
 
 **Presentation release: figures change, numbers do not.** No statistic, model,
