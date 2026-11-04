@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.2.0
+# Version 3.3.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.2.0.
+#   anti-pseudoreplication statistics. Version 3.3.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.2.0"
+APP_VERSION <- "3.3.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -256,16 +256,33 @@ compute_replicate_summaries <- function(df, measure) {
 }
 
 compute_condition_summaries <- function(rep_summary) {
+  # Every spread measure here is computed ACROSS biological replicates (one value
+  # per dish), never across cells: sd_* is the dish-to-dish SD, sem_* that SD
+  # over sqrt(N dishes), and ci95_* the half-width of the 95% t interval on the
+  # replicate values (NA with a single dish). The Trajectories tab lets the user
+  # pick which of the three its band/bars show and states the choice in the
+  # subtitle, so none of them is ever drawn unlabelled.
   rep_summary %>%
     group_by(Condition, Time_min) %>%
     summarise(
       grand_median = mean(median_val),
       grand_mean   = mean(mean_val),
+      sd_median    = sd(median_val),
+      sd_mean      = sd(mean_val),
       sem_median   = sd(median_val) / sqrt(n()),
       sem_mean     = sd(mean_val) / sqrt(n()),
       n_reps       = n(),
       .groups      = "drop"
+    ) %>%
+    mutate(
+      ci95_median = ifelse(n_reps > 1, qt(0.975, pmax(n_reps - 1, 1)) * sem_median, NA_real_),
+      ci95_mean   = ifelse(n_reps > 1, qt(0.975, pmax(n_reps - 1, 1)) * sem_mean,   NA_real_)
     )
+}
+
+# Human-readable name of a spread measure, for subtitles and captions.
+error_measure_label <- function(kind) {
+  switch(kind, sem = "SEM", sd = "SD", ci95 = "95% CI", kind)
 }
 
 
@@ -366,6 +383,47 @@ SHAPE_CHOICES <- c(
   "Asterisk"               = 8
 )
 DEFAULT_REP_SHAPES <- c(21, 22, 24, 23, 25)
+
+# =============================================================================
+# CONDITION AND REPLICATE COLOURS
+# Okabe-Ito is safe for the common forms of colour blindness and stays legible
+# when a figure is printed in greyscale. Conditions default to it (3.3.0; the
+# old default was a blue/red pair for two conditions and ggplot's rainbow
+# hue_pal() beyond that, neither of which is colourblind-safe). The vector is
+# reordered so a two-group experiment gets blue vs vermillion.
+# Replicates that are coloured individually ("Color individual cells by
+# replicate") take the Okabe-Ito colours the conditions are NOT using, so a
+# replicate can never be mistaken for a condition on the same figure.
+# =============================================================================
+OKABE_ITO <- c("#0072B2", "#D55E00", "#009E73", "#E69F00",
+               "#CC79A7", "#56B4E9", "#F0E442", "#999999")
+
+default_cond_colors <- function(n) {
+  n <- max(1L, as.integer(n))
+  if (n <= length(OKABE_ITO)) OKABE_ITO[seq_len(n)]
+  else scales::viridis_pal(option = "D", end = 0.92)(n)
+}
+
+rep_colors_for <- function(rep_levels, cond_cols) {
+  rep_levels <- as.character(rep_levels)
+  free <- setdiff(toupper(OKABE_ITO), toupper(as.character(cond_cols)))
+  free <- free[free != "#F0E442"]           # yellow vanishes at cell-point size
+  pool <- c(free, "#000000", "#4B4B4B", "#8C8C8C", "#C0C0C0")
+  setNames(rep(pool, length.out = max(1, length(rep_levels))), rep_levels)
+}
+
+# Quick-palette presets offered on the Data tab. The first entry is the default.
+PALETTE_PRESETS <- list(
+  "Okabe-Ito (colourblind-safe)"  = OKABE_ITO,
+  "Tol bright (colourblind-safe)" = c("#0077bb","#ee7733","#009988","#cc3311","#33bbee","#ee3377","#bbbbbb","#000000"),
+  "Viridis"                       = c("#440154","#31688e","#35b779","#fde725","#21918c","#5ec962","#90d743","#c8e020"),
+  "Blue/Red (pre-3.3 default)"    = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C","#1ABC9C","#F39C12"),
+  "Teal/Orange"                   = c("#2a9d8f","#e76f51","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
+  "Pastel"                        = c("#aec6cf","#ffb7b2","#b5ead7","#ffdac1","#c7ceea","#ff9aa2","#e2f0cb","#f8c8d4"),
+  "Bold"                          = c("#e63946","#2a9d8f","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
+  "Publication"                   = c("#0077b6","#e63946","#2a9d8f","#f4a261","#6a0dad","#e9c46a","#264653","#f77f00"),
+  "Grayscale"                     = paste0("grey", round(seq(20, 80, length.out = 8)))
+)
 
 # Split Condition labels like "pSJExD_gp75_100nM" into a numeric dose column
 # plus a base-label column (and generic part columns), so gradient designs can
@@ -1894,6 +1952,10 @@ ui <- page_navbar(
           tags$p(class = "small", style = "color:#8888a8;", "Plus numeric measurement columns."),
           tags$hr(),
           uiOutput("measure_selector"),
+          textInput("measure_unit", "Measurement unit (optional)", "",
+                    placeholder = "e.g. \u00b5m\u00b2, \u00b5m, a.u."),
+          tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-8px;",
+            "Remembered per measurement and added to every axis title, e.g. \"Area (\u00b5m\u00b2)\"."),
           uiOutput("condition_order_ui"),
           tags$hr(),
           tags$details(
@@ -2072,7 +2134,10 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("dist", 8, 5.5),
         tags$hr(),
-        downloadButton("dl_dist", "Download Figure", class = "btn-primary w-100")
+        downloadButton("dl_dist", "Download Figure", class = "btn-primary w-100"),
+        downloadButton("dl_dist_data", "Download Plot Data (CSV)", class = "btn-outline-secondary w-100 mt-2"),
+        tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
+          "The per-replicate medians and means behind the figure, for replotting elsewhere.")
       ),
       navset_card_tab(
         nav_panel("Plot",
@@ -2119,7 +2184,13 @@ ui <- page_navbar(
         radioButtons("traj_summary", "Summary Statistic",
                      choices = c("Median" = "median_val", "Mean" = "mean_val"), selected = "median_val"),
         checkboxInput("traj_smooth", "Add trend line (loess)", TRUE),
-        checkboxInput("traj_error", "Show SEM ribbon", TRUE),
+        checkboxInput("traj_error", "Show error band / bars", TRUE),
+        conditionalPanel("input.traj_error",
+          radioButtons("traj_error_type", "Error band / bars show",
+            choices = c("SEM" = "sem", "SD" = "sd", "95% CI" = "ci95"),
+            selected = "sem", inline = TRUE),
+          tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+            "Computed across biological replicates, never across cells. The subtitle states which one is drawn.")),
         checkboxInput("traj_connect_reps", "Connect individual replicates", TRUE),
         radioButtons("traj_style", "Style",
                      choices = c("Points + Lines" = "pointline", "Points + Ribbon" = "ribbon"),
@@ -2129,7 +2200,10 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("traj", 7, 5),
         tags$hr(),
-        downloadButton("dl_traj", "Download Figure", class = "btn-primary w-100")
+        downloadButton("dl_traj", "Download Figure", class = "btn-primary w-100"),
+        downloadButton("dl_traj_data", "Download Plot Data (CSV)", class = "btn-outline-secondary w-100 mt-2"),
+        tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
+          "Replicate summaries plus the group mean, SD, SEM and 95% CI drawn here, for replotting elsewhere.")
       ),
       navset_card_tab(
         nav_panel("Plot",
@@ -2139,7 +2213,11 @@ ui <- page_navbar(
           tags$h6("Understanding Trajectory Plots"),
           tags$p(tags$strong("Each point"), " is the median (or mean) of one biological replicate."),
           tags$p(tags$strong("Diverging lines"), " between conditions = Condition x Time interaction."),
-          tags$p(tags$strong("SEM ribbons"), " computed from replicate-level summaries: SD of the replicate values divided by the square root of the number of replicates in that group.")
+          tags$p(tags$strong("Error band / bars"), " are computed from the replicate-level summaries, never from cells: ",
+                 tags$strong("SD"), " is the dish-to-dish spread of the replicate values; ",
+                 tags$strong("SEM"), " is that SD divided by the square root of the number of replicates in the group; ",
+                 tags$strong("95% CI"), " is the t-based interval on the replicate values (undefined with one replicate). ",
+                 "The subtitle always names the one being drawn and the number of replicates per group.")
         ))
       )
     )
@@ -3276,7 +3354,8 @@ server <- function(input, output, session) {
         settings = list(
           measure = input$measure,
           ref_condition = input$ref_condition,
-          data_transform = input$data_transform
+          data_transform = input$data_transform,
+          measure_units = reactiveValuesToList(measure_units)
         ),
         app_version = APP_VERSION,
         saved_at = Sys.time()
@@ -3296,6 +3375,13 @@ server <- function(input, output, session) {
     if (!is.null(s$measure)) updateSelectInput(session, "measure", selected = s$measure)
     if (!is.null(s$ref_condition)) updateSelectInput(session, "ref_condition", selected = s$ref_condition)
     if (!is.null(s$data_transform)) updateSelectInput(session, "data_transform", selected = s$data_transform)
+    if (is.list(s$measure_units)) {
+      for (k in names(s$measure_units)) measure_units[[k]] <- s$measure_units[[k]]
+      # The text box only follows input$measure when that CHANGES; refresh it
+      # here too so a restored session shows its unit even for the same measure.
+      m_now <- s$measure %||% input$measure
+      if (!is.null(m_now)) updateTextInput(session, "measure_unit", value = s$measure_units[[m_now]] %||% "")
+    }
     pending_session_settings(NULL)
   }, ignoreInit = TRUE)
 
@@ -3547,9 +3633,40 @@ server <- function(input, output, session) {
     apply_transform_to_columns(df, mc, transform)
   })
 
-  measure_label <- reactive({
+  # Units are remembered PER measurement (Area -> um^2, Circularity -> nothing),
+  # so switching the measurement never carries the wrong unit onto an axis.
+  measure_units <- reactiveValues()
+  observeEvent(input$measure, {
+    req(input$measure)
+    updateTextInput(session, "measure_unit",
+                    value = isolate(measure_units[[input$measure]]) %||% "")
+  })
+  observeEvent(input$measure_unit, {
+    req(input$measure)
+    measure_units[[input$measure]] <- trimws(input$measure_unit %||% "")
+  })
+  measure_unit_now <- reactive({
+    m <- input$measure
+    if (is.null(m)) return("")
+    u <- measure_units[[m]]
+    if (is.null(u)) "" else trimws(u)
+  })
+
+  # Name of the measurement as it reads in a TITLE: transform shown, no unit.
+  measure_title <- reactive({
     m <- input$measure; tr <- input$data_transform %||% "none"
     if (tr == "log") paste0("log(", m, ")") else if (tr == "sqrt") paste0("sqrt(", m, ")") else m
+  })
+  # Name of the measurement as it reads on an AXIS: with its unit when one is
+  # set. A transformed axis is no longer in the raw unit, so the unit moves
+  # inside the transform -- "log(Area [um^2])", never "log(Area) (um^2)".
+  measure_label <- reactive({
+    m <- input$measure; tr <- input$data_transform %||% "none"
+    u <- measure_unit_now()
+    if (!nzchar(u)) return(measure_title())
+    if (tr == "log") paste0("log(", m, " [", u, "])")
+    else if (tr == "sqrt") paste0("sqrt(", m, " [", u, "])")
+    else paste0(m, " (", u, ")")
   })
 
   # Color pickers
@@ -3558,30 +3675,10 @@ server <- function(input, output, session) {
     conds <- levels(plot_data()$Condition)
     n <- length(conds)
 
-    # Named palette presets
-    PALETTE_PRESETS <- list(
-      "Custom"       = NULL,
-      "Blue/Red"     = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C","#1ABC9C","#F39C12"),
-      "Teal/Orange"  = c("#2a9d8f","#e76f51","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Pastel"       = c("#aec6cf","#ffb7b2","#b5ead7","#ffdac1","#c7ceea","#ff9aa2","#e2f0cb","#f8c8d4"),
-      "Bold"         = c("#e63946","#2a9d8f","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Publication"  = c("#0077b6","#e63946","#2a9d8f","#f4a261","#6a0dad","#e9c46a","#264653","#f77f00"),
-      "Colorblind"   = c("#0077bb","#ee7733","#009988","#cc3311","#33bbee","#ee3377","#bbbbbb","#000000"),
-      "Viridis"      = c("#440154","#31688e","#35b779","#fde725","#21918c","#5ec962","#90d743","#c8e020"),
-      "Grayscale"    = paste0("grey", round(seq(20, 80, length.out = 8)))
-    )
+    dcols <- default_cond_colors(n)
 
-    defaults_by_n <- list(
-      "2" = c("#4A90D9","#D94A4A"),
-      "3" = c("#4A90D9","#D94A4A","#F5A623"),
-      "4" = c("#4A90D9","#D94A4A","#F5A623","#7ED321"),
-      "5" = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6"),
-      "6" = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C")
-    )
-    dcols <- if (n <= 6) defaults_by_n[[as.character(n)]] else scales::hue_pal()(n)
-
-    sel_preset <- input$palette_preset_sel %||% "Custom"
-    if (!is.null(sel_preset) && sel_preset != "Custom" && sel_preset %in% names(PALETTE_PRESETS)) {
+    sel_preset <- input$palette_preset_sel %||% names(PALETTE_PRESETS)[1]
+    if (sel_preset != "Custom" && sel_preset %in% names(PALETTE_PRESETS)) {
       preset_cols <- rep_len(PALETTE_PRESETS[[sel_preset]], n)
     } else {
       preset_cols <- dcols
@@ -3590,7 +3687,9 @@ server <- function(input, output, session) {
     tagList(
       tags$p(tags$strong("Color Palette"), class = "mb-1"),
       selectInput("palette_preset_sel", "Quick palette",
-        choices = names(PALETTE_PRESETS), selected = sel_preset),
+        choices = c(names(PALETTE_PRESETS), "Custom"), selected = sel_preset),
+      tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+        "Okabe-Ito and Tol are distinguishable under the common forms of colour blindness and in greyscale print."),
       if (has_colourpicker)
         tagList(lapply(seq_along(conds), function(i) {
           cur <- input[[paste0("color_", i)]]
@@ -3606,16 +3705,6 @@ server <- function(input, output, session) {
   observeEvent(input$palette_preset_sel, {
     req(plot_data())
     conds <- levels(plot_data()$Condition); n <- length(conds)
-    PALETTE_PRESETS <- list(
-      "Blue/Red"    = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C","#1ABC9C","#F39C12"),
-      "Teal/Orange" = c("#2a9d8f","#e76f51","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Pastel"      = c("#aec6cf","#ffb7b2","#b5ead7","#ffdac1","#c7ceea","#ff9aa2","#e2f0cb","#f8c8d4"),
-      "Bold"        = c("#e63946","#2a9d8f","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Publication" = c("#0077b6","#e63946","#2a9d8f","#f4a261","#6a0dad","#e9c46a","#264653","#f77f00"),
-      "Colorblind"  = c("#0077bb","#ee7733","#009988","#cc3311","#33bbee","#ee3377","#bbbbbb","#000000"),
-      "Viridis"     = c("#440154","#31688e","#35b779","#fde725","#21918c","#5ec962","#90d743","#c8e020"),
-      "Grayscale"   = paste0("grey", round(seq(20, 80, length.out = 8)))
-    )
     if (!is.null(input$palette_preset_sel) && input$palette_preset_sel %in% names(PALETTE_PRESETS) && has_colourpicker) {
       cols <- rep_len(PALETTE_PRESETS[[input$palette_preset_sel]], n)
       for (i in seq_along(conds)) {
@@ -3627,7 +3716,7 @@ server <- function(input, output, session) {
   cond_colors <- reactive({
     req(plot_data())
     conds <- levels(plot_data()$Condition); n <- length(conds)
-    dcols <- if (n == 2) c("#4A90D9", "#D94A4A") else scales::hue_pal()(n)
+    dcols <- default_cond_colors(n)
     cols <- if (has_colourpicker)
       sapply(seq_along(conds), function(i) { v <- input[[paste0("color_", i)]]; if (!is.null(v) && nchar(v) > 0) v else dcols[i] })
     else dcols
@@ -3684,10 +3773,11 @@ server <- function(input, output, session) {
   })
 
   # === DISTRIBUTIONS TAB ===
-  dist_plot_obj <- reactive({
-    req(transformed_data(), input$measure, input$dist_type)
-    df  <- transformed_data(); m <- input$measure; rs <- rep_summ(); cols <- cond_colors()
-    mlbl <- measure_label()
+  # The sample / timepoint filters, shared by the figure and its data export so
+  # the CSV always holds exactly the replicate summaries the figure drew.
+  dist_subset <- reactive({
+    req(transformed_data(), input$measure)
+    df <- transformed_data(); rs <- rep_summ()
 
     # ── Apply sample filter (checkboxes) ────────────────────────────────────
     sel_conds <- input$dist_cond_sel
@@ -3708,6 +3798,17 @@ server <- function(input, output, session) {
       if (!is.null(rs)) rs <- rs[rs$Time_min %in% sel_times, , drop = FALSE]
     }
 
+    # Drop unused factor levels after filtering
+    if (is.factor(df$Condition)) df$Condition <- droplevels(df$Condition)
+    list(df = df, rs = rs)
+  })
+
+  dist_plot_obj <- reactive({
+    req(transformed_data(), input$measure, input$dist_type)
+    m <- input$measure; cols <- cond_colors()
+    mlbl <- measure_label(); mttl <- measure_title()
+    sub <- dist_subset(); df <- sub$df; rs <- sub$rs
+
     if (nrow(df) == 0) {
       return(ggplot() +
                annotate("text", x=0.5, y=0.5, label="No data — check sample / timepoint filters",
@@ -3715,18 +3816,16 @@ server <- function(input, output, session) {
                theme_void())
     }
 
-    # Drop unused factor levels after filtering
-    if (is.factor(df$Condition)) df$Condition <- droplevels(df$Condition)
-
-    # Recompute cols after possible subsetting
+    # Look the surviving conditions up BY NAME in the shared palette. Until
+    # 3.3.0 the colours were rebuilt positionally from the filtered levels, so
+    # hiding one condition shifted the colours of all the others and the
+    # Distributions tab stopped matching the Pub Figure.
     cond_levels_now <- if (is.factor(df$Condition)) levels(df$Condition) else unique(df$Condition)
-    n_now  <- length(cond_levels_now)
-    dcols2 <- if (n_now <= 2) c("#4A90D9","#D94A4A") else scales::hue_pal()(n_now)
-    cols   <- sapply(seq_along(cond_levels_now), function(i) {
-      v <- if (has_colourpicker) input[[paste0("color_", i)]] else NULL
-      if (!is.null(v) && nchar(v) > 0) v else dcols2[i]
-    })
-    cols <- setNames(cols, cond_levels_now)
+    n_now <- length(cond_levels_now)
+    cols  <- cols[cond_levels_now]
+    miss  <- is.na(cols)
+    if (any(miss)) cols[miss] <- default_cond_colors(n_now)[miss]
+    cols  <- setNames(as.character(cols), cond_levels_now)
 
     df$Time_fac <- factor(fmt_time(df$Time_min),
                           levels = fmt_time(sort(unique(df$Time_min))))
@@ -3804,11 +3903,10 @@ server <- function(input, output, session) {
     }, numeric(1))
     cell_shape <- suppressWarnings(as.numeric(input$dist_cell_shape %||% 19))
     if (is.na(cell_shape)) cell_shape <- 19
-    # Okabe-Ito colorblind-safe palette for replicate coloring
-    okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
-                   "#D55E00", "#CC79A7", "#999999")
-    rep_cols <- setNames(rep(okabe_ito, length.out = max(1, nlevels(df$Rep_fac))),
-                         levels(df$Rep_fac))
+    # Replicates take the colourblind-safe colours the conditions are not using.
+    # Chosen against the FULL condition palette, not the filtered one, so a
+    # replicate keeps its colour whichever conditions are shown.
+    rep_cols <- rep_colors_for(levels(df$Rep_fac), cond_colors())
 
     # --- Build base plot ---
     if (input$dist_type == "violin") {
@@ -3851,7 +3949,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Sample", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "Distributions"),
+                      title = paste("Single-Cell", mttl, "Distributions"),
                       subtitle = paste0("Violins = cell distributions; dots = replicate ", stat_type, "s; bar = group ", stat_type, ". Sample labels shown on X axis."))
       } else {
         p <- ggplot(df, aes(x = x_var_col, y = .data[[m]], fill = fill_var)) +
@@ -3887,7 +3985,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = x_label_base, y = mlbl,
-                      title = paste("Single-Cell", mlbl, "Distributions"),
+                      title = paste("Single-Cell", mttl, "Distributions"),
                       subtitle = paste0("Violins = cell distributions; dots = replicate ", stat_type, "s; bar = group ", stat_type))
       }
 
@@ -3904,7 +4002,7 @@ server <- function(input, output, session) {
       df$Group <- factor(df$Group, levels = group_levels)
       p <- ggplot(df, aes(x = .data[[m]], y = Group, fill = Condition)) +
         ggridges::geom_density_ridges(alpha = 0.7, scale = 1.3, linewidth = 0.3) +
-        scale_fill_manual(values = cols) + labs(x = mlbl, y = NULL, title = paste("Ridge Plot --", mlbl))
+        scale_fill_manual(values = cols) + labs(x = mlbl, y = NULL, title = paste("Ridge Plot --", mttl))
 
     } else if (input$dist_type == "strip") {
       if (sample_x_mode) {
@@ -3934,7 +4032,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Sample", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Jitter Plot"),
+                      title = paste("Single-Cell", mttl, "-- Jitter Plot"),
                       subtitle = paste0("Each point = one cell; bar = group ", stat_type, "; circles = replicate ", stat_type, "s."))
       } else {
         if (cells_by_rep) {
@@ -3964,7 +4062,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Time Post-Infection", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Jitter Plot"),
+                      title = paste("Single-Cell", mttl, "-- Jitter Plot"),
                       subtitle = paste0("Each point = one cell; bar = group ", stat_type, "; circles = replicate ", stat_type, "s"))
       }
 
@@ -4001,7 +4099,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Sample", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Sina Plot"),
+                      title = paste("Single-Cell", mttl, "-- Sina Plot"),
                       subtitle = paste0("Density-spread points; dots = replicate ", stat_type, "s; bar = group ", stat_type))
       } else {
         if (cells_by_rep) {
@@ -4042,7 +4140,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Time Post-Infection", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Sina Plot"),
+                      title = paste("Single-Cell", mttl, "-- Sina Plot"),
                       subtitle = paste0("Density-spread points; dots = replicate ", stat_type, "s; bar = group ", stat_type))
       }
 
@@ -4056,7 +4154,7 @@ server <- function(input, output, session) {
                        width = 0.3, linewidth = 0.5, color = "black") +
           scale_color_manual(values = time_fill_cols, guide = "none") +
           labs(x = "Sample", y = paste(tools::toTitleCase(stat_type), mlbl, "(per replicate)"),
-               title = paste(mlbl, "-- Replicate Summary"),
+               title = paste(mttl, "-- Replicate Summary"),
                subtitle = paste0("Each point = one replicate ", stat_type, "; crossbar = group ", stat_type))
       } else {
         p <- ggplot(rs, aes(x = Time_fac, y = .data[[stat_col]], color = Condition)) +
@@ -4067,7 +4165,7 @@ server <- function(input, output, session) {
                        position = position_dodge(0.5), width = 0.3, linewidth = 0.5) +
           scale_color_manual(values = cols) +
           labs(x = "Time Post-Infection", y = paste(tools::toTitleCase(stat_type), mlbl, "(per replicate)"),
-               title = paste(mlbl, "-- Replicate Summary"),
+               title = paste(mttl, "-- Replicate Summary"),
                subtitle = paste0("Each point = one replicate ", stat_type, "; crossbar = group ", stat_type))
       }
 
@@ -4090,7 +4188,7 @@ server <- function(input, output, session) {
                                 shape = 18, size = rep_sz, color = rep_col, alpha = rep_al, show.legend = FALSE)
           }
         }
-        p <- p + labs(x = "Sample", y = mlbl, title = paste("Box Plot --", mlbl),
+        p <- p + labs(x = "Sample", y = mlbl, title = paste("Box Plot --", mttl),
                       subtitle = paste0("Replicate ", stat_type, "s overlaid"))
       } else {
         p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
@@ -4109,7 +4207,7 @@ server <- function(input, output, session) {
                                 size = rep_sz, color = rep_col, alpha = rep_al)
           }
         }
-        p <- p + labs(x = "Time Post-Infection", y = mlbl, title = paste("Box Plot --", mlbl),
+        p <- p + labs(x = "Time Post-Infection", y = mlbl, title = paste("Box Plot --", mttl),
                       subtitle = paste0("Replicate ", stat_type, "s overlaid"))
       }
 
@@ -4117,7 +4215,7 @@ server <- function(input, output, session) {
       p <- ggplot(df, aes(x = .data[[m]], color = Condition)) +
         stat_ecdf(linewidth = 0.8) + scale_color_manual(values = cols) +
         {if (has_time()) facet_wrap(~ Time_fac, nrow = 1) else NULL} +
-        labs(x = mlbl, y = "Cumulative Proportion", title = paste("ECDF --", mlbl),
+        labs(x = mlbl, y = "Cumulative Proportion", title = paste("ECDF --", mttl),
              subtitle = "Rightward shift = larger values")
     } else if (input$dist_type == "histogram") {
       bins <- input$dist_hist_bins %||% 40
@@ -4126,14 +4224,14 @@ server <- function(input, output, session) {
           geom_histogram(bins = bins, alpha = 0.7, position = "identity", linewidth = 0.2, color = "white") +
           facet_wrap(~ Condition, scales = "free_y") +
           scale_fill_viridis_d(option = "plasma", name = "Time") +
-          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mlbl),
+          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mttl),
                subtitle = "Faceted by condition; colored by timepoint")
       } else {
         p <- ggplot(df, aes(x = .data[[m]], fill = Condition)) +
           geom_histogram(bins = bins, alpha = 0.7, position = "identity", linewidth = 0.2, color = "white") +
           facet_wrap(~ Condition, scales = "free_y") +
           scale_fill_manual(values = cols, guide = "none") +
-          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mlbl),
+          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mttl),
                subtitle = "One panel per sample")
       }
 
@@ -4148,7 +4246,7 @@ server <- function(input, output, session) {
       p <- ggplot(freq, aes(x = Time_fac, y = pct, fill = size_bin)) +
         geom_col(position = "stack", width = 0.75) + facet_wrap(~ Condition) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
-        labs(x = "Time", y = "% of Cells", title = paste("Population Proportions --", mlbl),
+        labs(x = "Time", y = "% of Cells", title = paste("Population Proportions --", mttl),
              subtitle = "Cells binned into quartiles of the overall distribution") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
@@ -4166,7 +4264,7 @@ server <- function(input, output, session) {
         facet_grid(Condition ~ Time_fac,
                    labeller = labeller(Condition = function(x) wrap_axis_labels(x, 16))) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
-        labs(x = NULL, y = NULL, title = paste("Cell Size Composition --", mlbl),
+        labs(x = NULL, y = NULL, title = paste("Cell Size Composition --", mttl),
              subtitle = "Proportional pie chart; faceted by condition and time")
 
     } else if (input$dist_type == "donut") {
@@ -4183,13 +4281,13 @@ server <- function(input, output, session) {
         facet_grid(Condition ~ Time_fac,
                    labeller = labeller(Condition = function(x) wrap_axis_labels(x, 16))) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
-        labs(x = NULL, y = NULL, title = paste("Cell Composition --", mlbl, "(Donut)"),
+        labs(x = NULL, y = NULL, title = paste("Cell Composition --", mttl, "(Donut)"),
              subtitle = "Proportional donut chart; faceted by condition and time")
 
     } else {
       p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
         geom_violin(position = position_dodge(0.8), alpha = 0.7) +
-        scale_fill_manual(values = cols) + labs(x = "Time", y = mlbl, title = paste(mlbl, "Distributions"))
+        scale_fill_manual(values = cols) + labs(x = "Time", y = mlbl, title = paste(mttl, "Distributions"))
     }
 
     # Human-readable legend titles: never leak internal names like "fill_var".
@@ -4394,6 +4492,17 @@ server <- function(input, output, session) {
   output$dl_dist <- downloadHandler(
     filename = function() paste0("distributions_", input$measure, ".", fmt_ext(input$dist_format)),
     content  = function(file) save_figure(file, dist_plot_obj(), input$dist_width, input$dist_height, input$dist_dpi, input$dist_format))
+  # The replicate summaries behind the figure (after the sample / timepoint
+  # filters), for replotting in Prism, Excel or another R session.
+  output$dl_dist_data <- downloadHandler(
+    filename = function() paste0("distributions_", input$measure, "_replicate_summaries.csv"),
+    content  = function(file) {
+      rs <- dist_subset()$rs
+      if (is.null(rs) || nrow(rs) == 0) rs <- data.frame()
+      out <- as.data.frame(rs)
+      if (nrow(out) > 0) out <- cbind(Measurement = measure_label(), out)
+      write.csv(out, file, row.names = FALSE)
+    })
 
   # --- Keep the figure brackets and the Statistics table in one family --------
   # The brackets always compare conditions WITHIN each timepoint, on replicate
@@ -4420,13 +4529,26 @@ server <- function(input, output, session) {
     req(rep_summ(), cond_summ(), input$traj_summary)
     validate(need(has_time(),
       "This dataset has no time column, so there is no trajectory to plot. Use the Distributions tab to compare samples directly."))
-    rs <- rep_summ(); cs <- cond_summ(); cols <- cond_colors(); yvar <- input$traj_summary; mlbl <- measure_label()
+    rs <- rep_summ(); cs <- cond_summ(); cols <- cond_colors(); yvar <- input$traj_summary
+    mlbl <- measure_label(); mttl <- measure_title()
     ylab <- if (yvar == "median_val") paste("Median", mlbl, "per Replicate") else paste("Mean", mlbl, "per Replicate")
+    stat_word <- if (yvar == "median_val") "medians" else "means"
+
+    # Which spread the band / bars show. All three are computed across dishes in
+    # compute_condition_summaries(); the subtitle names the one drawn. (Until
+    # 3.3.0 the only choice was SEM, and with the trend line on, the "SEM" box
+    # silently drew loess's own confidence band instead.)
+    show_err <- isTRUE(input$traj_error)
+    err_kind <- if (show_err) (input$traj_error_type %||% "sem") else NULL
+    cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
+    cs$err  <- if (show_err) cs[[paste0(err_kind, "_", ifelse(yvar == "median_val", "median", "mean"))]] else NA_real_
+    use_ribbon <- show_err && input$traj_style == "ribbon"
+    use_bars   <- show_err && input$traj_style == "pointline"
+
     p <- ggplot()
-    if (input$traj_error && input$traj_style == "ribbon") {
-      cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
-      cs$sem  <- cs[[ifelse(yvar == "median_val", "sem_median", "sem_mean")]]
-      p <- p + geom_ribbon(data = cs, aes(x = Time_min, ymin = yvar - sem, ymax = yvar + sem, fill = Condition), alpha = 0.2) +
+    if (use_ribbon) {
+      p <- p + geom_ribbon(data = cs[is.finite(cs$err), , drop = FALSE],
+                           aes(x = Time_min, ymin = yvar - err, ymax = yvar + err, fill = Condition), alpha = 0.2) +
         scale_fill_manual(values = cols)
     }
     traj_pt_sz <- input$traj_point_size %||% 3
@@ -4434,18 +4556,29 @@ server <- function(input, output, session) {
     if (input$traj_connect_reps) p <- p + geom_line(data = rs, aes(x = Time_min, y = .data[[yvar]], group = interaction(Condition, Replicate), color = Condition), alpha = 0.4, linewidth = traj_ln_w * 0.4, linetype = "dashed")
     p <- p + geom_point(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition, shape = Replicate), size = traj_pt_sz, alpha = 0.8)
     if (input$traj_smooth) {
+      # The trend line is drawn without its own confidence band: the band/bars
+      # on this figure always come from the replicate summaries, so that one
+      # figure never carries two differently-defined intervals.
       n_times <- length(unique(rs$Time_min))
-      if (n_times >= 4) p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "loess", se = input$traj_error && input$traj_style == "pointline", linewidth = traj_ln_w, alpha = 0.15, span = 1)
-      else p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "lm", se = input$traj_error && input$traj_style == "pointline", linewidth = traj_ln_w, alpha = 0.15)
+      if (n_times >= 4) p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "loess", se = FALSE, linewidth = traj_ln_w, span = 1)
+      else p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "lm", se = FALSE, linewidth = traj_ln_w)
     }
-    if (input$traj_error && input$traj_style == "pointline" && !input$traj_smooth) {
-      cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
-      cs$sem  <- cs[[ifelse(yvar == "median_val", "sem_median", "sem_mean")]]
-      p <- p + geom_errorbar(data = cs, aes(x = Time_min, ymin = yvar - sem, ymax = yvar + sem, color = Condition), width = 3, linewidth = 0.6)
+    if (use_bars) {
+      p <- p + geom_errorbar(data = cs[is.finite(cs$err), , drop = FALSE],
+                             aes(x = Time_min, ymin = yvar - err, ymax = yvar + err, color = Condition), width = 3, linewidth = 0.6)
     }
+
+    # Subtitle: every mark on the figure is named, with the real replicate count.
+    n_rng <- range(cs$n_reps, na.rm = TRUE)
+    n_txt <- if (n_rng[1] == n_rng[2]) n_rng[1] else paste0(n_rng[1], "-", n_rng[2])
+    parts <- paste0("Each point = one replicate ", sub("s$", "", stat_word), " (N = ", n_txt, " per group)")
+    if (input$traj_connect_reps) parts <- c(parts, "dashed lines connect replicates")
+    if (input$traj_smooth) parts <- c(parts, "solid line = trend")
+    if (use_ribbon) parts <- c(parts, paste0("band = ", error_measure_label(err_kind), " of replicate ", stat_word))
+    if (use_bars)   parts <- c(parts, paste0("bars = ", error_measure_label(err_kind), " of replicate ", stat_word))
     p <- p + scale_color_manual(values = cols) + scale_x_continuous(breaks = sort(unique(rs$Time_min))) +
-      labs(x = "Time Post-Infection (min)", y = ylab, title = paste(mlbl, "Trajectory Over Time"),
-           subtitle = "Each point = one replicate; dashed lines connect replicates") +
+      labs(x = "Time Post-Infection (min)", y = ylab, title = paste(mttl, "Trajectory Over Time"),
+           subtitle = paste(parts, collapse = "; ")) +
       get_theme(input, "traj")
     apply_custom_labs(p, input, "traj")
   })
@@ -4454,6 +4587,17 @@ server <- function(input, output, session) {
   output$dl_traj <- downloadHandler(
     filename = function() paste0("trajectory_", input$measure, ".", fmt_ext(input$traj_format)),
     content  = function(file) save_figure(file, traj_plot_obj(), input$traj_width, input$traj_height, input$traj_dpi, input$traj_format))
+  # Replicate summaries joined to the condition summaries (grand mean / median,
+  # SD, SEM, 95% CI, N) -- everything the trajectory figure is drawn from.
+  traj_plot_data <- reactive({
+    rs <- rep_summ(); cs <- cond_summ()
+    req(!is.null(rs), !is.null(cs))
+    out <- dplyr::left_join(as.data.frame(rs), as.data.frame(cs), by = c("Condition", "Time_min"))
+    cbind(Measurement = measure_label(), out)
+  })
+  output$dl_traj_data <- downloadHandler(
+    filename = function() paste0("trajectory_", input$measure, "_plot_data.csv"),
+    content  = function(file) write.csv(traj_plot_data(), file, row.names = FALSE))
 
   # === STATISTICS TAB ===
   stat_results <- reactiveVal(NULL)
@@ -4887,7 +5031,7 @@ server <- function(input, output, session) {
 
   es_plot_obj <- reactive({
     req(es_data(), input$es_type)
-    esd <- es_data(); cols <- cond_colors(); yvar <- input$es_type; mlbl <- measure_label()
+    esd <- es_data(); cols <- cond_colors(); yvar <- input$es_type; mlbl <- measure_label(); mttl <- measure_title()
     ylab <- switch(yvar, abs_diff = paste("Delta", mlbl), pct_change = paste("% Change in", mlbl),
                    hedges_g = "Hedges' g (95% CI)")
     # Filter control if not requested
@@ -4916,7 +5060,7 @@ server <- function(input, output, session) {
       p <- p + geom_line(linewidth = 1.2) + geom_point(size = 4)
     }
     p <- p + scale_color_manual(values = cols_es) + scale_x_continuous(breaks = sort(unique(esd$Time_min))) +
-      labs(x = "Time (min)", y = ylab, title = paste("Effect on", mlbl, "Over Time"),
+      labs(x = "Time (min)", y = ylab, title = paste("Effect on", mttl, "Over Time"),
            subtitle = if (isTRUE(input$es_show_control)) "Control shown as baseline (0)" else "Treatment vs control") +
       get_theme(input, "es")
     if (yvar == "hedges_g") {
@@ -5904,8 +6048,20 @@ server <- function(input, output, session) {
         geom_line(aes(group = interaction(Condition, Replicate)), alpha = 0.35, linewidth = 0.4, linetype = "dashed") +
         geom_point(aes(shape = Replicate), size = 2.5, alpha = 0.8) + scale_color_manual(values = cols) +
         scale_x_continuous(breaks = sort(unique(rs$Time_min))) + labs(x = "Time (min)", y = paste("Median", mlbl)) + theme_publication(base)
-      if (length(unique(rs$Time_min)) >= 4) ptj <- ptj + geom_smooth(method = "loess", se = TRUE, alpha = 0.12, linewidth = 1.1, span = 1)
+      if (length(unique(rs$Time_min)) >= 4) ptj <- ptj + geom_smooth(method = "loess", se = FALSE, linewidth = 1.1, span = 1)
       else ptj <- ptj + stat_summary(fun = mean, geom = "line", linewidth = 1.1)
+      # Error bars follow the Trajectories tab's choice (SD / SEM / 95% CI of the
+      # replicate medians) so panel B is the same figure the tab shows; the loess
+      # band is not drawn, for the same reason as on the tab.
+      if (isTRUE(input$traj_error %||% TRUE)) {
+        cs <- cond_summ()
+        if (!is.null(cs)) {
+          cs$err <- cs[[paste0(input$traj_error_type %||% "sem", "_median")]]
+          cs <- cs[is.finite(cs$err), , drop = FALSE]
+          ptj <- ptj + geom_errorbar(data = cs, aes(x = Time_min, ymin = grand_median - err, ymax = grand_median + err, color = Condition),
+                                     inherit.aes = FALSE, width = 3, linewidth = 0.5)
+        }
+      }
       # No in-panel legend: the composite carries one shared legend at the bottom
       panels[["traj"]] <- ptj + theme(legend.position = "none")
     }
@@ -5993,7 +6149,7 @@ server <- function(input, output, session) {
     req(has_patchwork)
     panels <- pub_panels_list()
     if (length(panels) == 0) return(NULL)
-    base <- input$pub_base_size %||% 11; mlbl <- measure_label()
+    base <- input$pub_base_size %||% 11; mttl <- measure_title()
     # Exactly one panel keeps its legend (the first); patchwork then collects it
     # into a single shared legend below the figure. Whichever panels the user
     # picks, no panel ends up with a legend spilling over its neighbours.
@@ -6004,7 +6160,7 @@ server <- function(input, output, session) {
     n_panels <- length(labeled)
     pub_title <- {
       ct <- input$pub_custom_title %||% ""
-      if (nzchar(trimws(ct))) ct else paste(mlbl, "-- Time Course")
+      if (nzchar(trimws(ct))) ct else paste(mttl, "-- Time Course")
     }
     # guides = "collect" lifts the single kept legend out of its panel and into
     # one shared legend under the whole figure, so it cannot overflow a panel.
@@ -6204,7 +6360,8 @@ server <- function(input, output, session) {
       "                   group = Condition, shape = factor(Replicate)),",
       "               position = position_dodge(0.8), size = 2.6, colour = \"black\", stroke = 0.7) +",
       '    scale_shape_manual(values = c(21, 22, 24, 23, 25), name = "Replicate") +',
-      "    scale_fill_manual(values = scales::hue_pal()(length(unique(d$Condition)))) +",
+      "    # Okabe-Ito colourblind-safe palette, the app's default since 3.3.0",
+      "    scale_fill_manual(values = rep_len(c('#0072B2','#D55E00','#009E73','#E69F00','#CC79A7','#56B4E9','#F0E442','#999999'), length(unique(d$Condition)))) +",
       paste0("    labs(x = ", q(if (isolate(has_time())) "Time" else "Sample"),
              ", y = ", q(m), ", fill = \"Condition\","),
       paste0("         title = paste(MEASURE, \"by condition\"),"),

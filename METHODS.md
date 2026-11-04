@@ -72,6 +72,15 @@ per condition and 5 timepoints has 3 independent units per condition, not 15.
   reach significance and that pairwise tests are underpowered; the trend test or
   the mixed model is preferred.
 
+**3b. Trajectory figures.** Each point is one biological replicate's summary
+value; the band or error bars show the SD, the SEM, or the 95% t-interval of
+those replicate values (the user's choice, named in the figure subtitle
+together with the number of replicates per group), never a spread computed
+across cells. The trend line is a loess (or, with fewer than four timepoints,
+linear) fit through the replicate values and carries no interval of its own.
+Conditions are coloured with the Okabe-Ito colourblind-safe palette unless the
+user chooses otherwise.
+
 **4. Export.** Figures are rendered with ggplot2 and exported at user-set
 dimensions and resolution as PDF, SVG, TIFF, EPS, PNG, or as editable vector
 graphics in PowerPoint (officer/rvg), so text and shapes remain editable.
@@ -81,7 +90,7 @@ graphics in PowerPoint (officer/rvg), so text and shapes remain editable.
 ## Copy-paste Methods paragraph
 
 > Single-cell morphometric data were visualized and analyzed in CellMorphR
-> v3.2.0 (Awuah, M.B.; https://github.com/mbaffour/CellMorphR), an R (v4.6.0)
+> v3.3.0 (Awuah, M.B.; https://github.com/mbaffour/CellMorphR), an R (v4.6.0)
 > Shiny application built on ggplot2. Distributions of single-cell
 > measurements were plotted per condition and timepoint as violin (kernel
 > density) plots with individual biological-replicate summary values (median

@@ -4,15 +4,21 @@ Audit of CellMorphR's plotting/presentation against a figure-publication rubric,
 plus the safe presentation improvements applied on the `claude/publication-quality`
 branch and the deeper changes deferred as recommendations.
 
-> **Status: recommendations, not applied code.** Every row this document marks
-> **Fixed** was applied on the `claude/publication-quality` branch, against a
-> repository layout (`R-code/`, `python_script/`) that does not exist here. None
-> of them are present in `CellMorphR_v3.R` on this branch: there is no
-> `palette_colors()` (conditions are still coloured by `scales::hue_pal()` and a
-> fixed blue/red pair for n=2), no `axis_label()` helper and no measurement-unit
-> input, and no "band/bars = SEM" wording. Read the **Fixed** column as
-> *proposed*. The colourblind-safe palette in particular is **not** in effect, so
-> do not rely on this document when choosing colours for a figure.
+> **Status (3.3.0, 2026-11-04): the R-app rows below are now applied in
+> `CellMorphR_v3.R`.** Until 3.3.0 every row this document marks **Fixed** had
+> been applied only on a `claude/publication-quality` branch against a
+> repository layout (`R-code/`, `python_script/`) that does not exist here, and
+> none of it was in the shipped app. As of 3.3.0 the app has: an Okabe-Ito
+> default condition palette (`default_cond_colors()`, `OKABE_ITO`,
+> `PALETTE_PRESETS`), a per-measurement unit input whose unit appears in the axis
+> titles of the Distributions, Trajectories, Effect Sizes and Pub Figure tabs
+> (`measure_label()`), a user choice of SD / SEM / 95% CI on the
+> Trajectories tab whose subtitle names the measure and the replicate count,
+> and replicate colours that cannot coincide with condition colours
+> (`rep_colors_for()`). Deferred items 1 (per-replicate connectors), 4
+> (colourblind simulation) and 6 (trajectory significance) remain open; item 2
+> is done (units are per measurement, kept with the session); item 5 is done.
+> The Python rows still describe a script that is not in this repository.
 >
 > The statistical findings are tracked separately in
 > [`AUDIT-2026-09.md`](AUDIT-2026-09.md) (finding CM-11 is this document); the

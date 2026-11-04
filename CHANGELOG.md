@@ -4,6 +4,72 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.3.0 — 2026-11-04
+
+**Presentation release: figures change, numbers do not.** No statistic, model,
+test or correction is touched. Figures regenerated with 3.3.0 will differ from
+3.2.0 figures in their default colours and in what the Trajectories band/bars
+show, both of which are stated below. Every change lives in the plotting code
+and the Data-tab sidebar; the statistical core gains only the extra spread
+columns listed under *Added*.
+
+### Changed — figures
+
+- **Conditions default to the Okabe-Ito colourblind-safe palette.** Up to 3.2.0
+  a two-condition experiment was drawn in a fixed blue/red pair and anything
+  larger in ggplot's rainbow `hue_pal()`, neither of which is distinguishable
+  under deuteranopia or in greyscale print. The default is now Okabe-Ito
+  (blue, vermillion, green, orange, ...), one distinct colour for up to eight
+  conditions and viridis beyond. The old default is still offered as the
+  *Blue/Red (pre-3.3 default)* preset, and the Paul Tol set as *Tol bright*.
+  Per-condition colour pickers are unchanged.
+- **Replicate colours no longer collide with condition colours.** When
+  *Color individual cells by replicate* is on, replicates take the Okabe-Ito
+  colours the conditions are **not** using (then dark greys), chosen against
+  the full condition palette so a replicate keeps its colour whichever
+  conditions are shown.
+- **Hiding a condition no longer recolours the others.** The Distributions tab
+  rebuilt its colours positionally from the filtered condition list, so
+  unticking one sample shifted the colours of every remaining one and the tab
+  stopped matching the Pub Figure. Colours are now looked up by condition
+  name in the one shared palette.
+- **The Trajectories band/bars are a stated choice: SD, SEM or 95% CI.** The
+  old *Show SEM ribbon* box always drew SEM, except that with the trend line on
+  it silently drew loess's own confidence band instead, and the subtitle never
+  said which. The sidebar now offers SD / SEM / 95% CI, all computed across
+  biological replicates (never cells), the subtitle names the one drawn
+  together with the real replicate count per group, and the trend line is
+  drawn without a band of its own so one figure never carries two
+  differently-defined intervals. Panel B of the composite figure follows the
+  same choice. The default is still SEM.
+- **Titles no longer repeat the unit.** Axis titles carry the unit (below);
+  plot titles name the measurement only.
+
+### Added
+
+- **Measurement unit on the Data tab.** An optional unit (`µm²`, `µm`, `a.u.`)
+  is remembered per measurement, saved with the session, and appended to the
+  axis titles of the Distributions, Trajectories, Effect Sizes and Pub Figure
+  tabs: `Area (µm²)`, `Median Area (µm²) per Replicate`. (The Multi-Feature and
+  Cell Metrics tabs plot several measurements at once and stay unit-free.) Under a
+  transform the unit moves inside it, `log(Area [µm²])`, because a log axis is
+  no longer in square microns. Blank leaves every title exactly as before.
+- **Download Plot Data (CSV)** on the Distributions and Trajectories tabs: the
+  per-replicate medians and means behind the figure (after the sample and
+  timepoint filters), and for Trajectories the group mean/median, SD, SEM,
+  95% CI and N as well, for replotting in Prism, Excel or another R session.
+- `compute_condition_summaries()` gains `sd_median`, `sd_mean`, `ci95_median`
+  and `ci95_mean` (half-widths of the t-based 95% interval on the replicate
+  values; `NA` with a single replicate), alongside the existing SEM columns.
+  Covered by `tests/testthat/test-plot-helpers.R`, as are the palette helpers.
+
+### Not done (still recommendations in `PUBLICATION_QUALITY_NOTES.md`)
+
+- A colourblind-simulation preview, significance annotations on trajectory
+  plots, and per-replicate connectors on SuperPlots.
+- The Script Builder and `analysis_template.R` now emit the Okabe-Ito palette,
+  but their generated scripts do not carry the unit or the error-bar choice.
+
 ## 3.2.0 — 2026-09-12
 
 **This release changes reported p-values and effect sizes.** Both global models

@@ -22,7 +22,7 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 
 | Version | App file | Status |
 |---------|----------|--------|
-| **3.2.0** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
+| **3.3.0** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, colourblind-safe default palette, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
 Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
@@ -326,9 +326,10 @@ The sidebar controls everything downstream:
 | Control | What it does |
 |---------|--------------|
 | **Measurement Variable** | Which column all the plots and statistics use |
+| **Measurement unit** | Optional, remembered per measurement (`µm²`, `µm`, `a.u.`); appended to the axis titles on the Distributions, Trajectories, Effect Sizes and Pub Figure tabs, e.g. `Area (µm²)`, or `log(Area [µm²])` under a transform |
 | **Reference (control) condition** | The baseline for effect sizes and "vs control" comparisons |
 | **Data transform** | None / log / sqrt, applied to every measurement |
-| **Colour palette** | 9 presets plus a per-condition colour picker |
+| **Colour palette** | Okabe-Ito (colourblind-safe) by default, 8 other presets including Tol and the pre-3.3 Blue/Red, plus a per-condition colour picker |
 | **Rename samples** | Edit condition names and timepoint labels (see Editing figures below) |
 | **Split Condition into factors** | Turn `pSJExD_gp75_100nM` into a `Condition_Base` plus a numeric `Dose_nM` column, enabling factorial grouping and the trend test |
 | **Save / Resume session** | Write an `.rds` you can reload later |
@@ -367,9 +368,13 @@ on the X axis, log axis, manual Y limits, label angle and wrapping.
 
 ### 3. Trajectories Tab
 
-Replicate summaries over time, with loess or linear trend and SEM ribbons or
-error bars. Each point is one biological replicate; dashed lines connect
-replicates. With no time column this tab explains that there is nothing to plot
+Replicate summaries over time, with loess or linear trend and an error band or
+bars showing your choice of **SD, SEM or 95% CI** across biological replicates
+(never across cells). The subtitle always names the one drawn and the number
+of replicates per group. Each point is one biological replicate; dashed lines
+connect replicates. **Download Plot Data (CSV)** exports the replicate
+summaries together with the group mean, SD, SEM, 95% CI and N behind the
+figure. With no time column this tab explains that there is nothing to plot
 and points you back to Distributions.
 
 ### 4. Morphospace (PCA) Tab
@@ -848,7 +853,7 @@ CellMorphR offers 7 distribution plot styles (R Shiny) or 5 styles (Python) to s
 **Why this design:**
 - Each point is one biological replicate â€” the unit of statistical inference. Connecting points from the same replicate across time (dashed lines) shows individual trajectories.
 - The smooth trend line (loess) captures the overall temporal pattern per condition.
-- The SEM ribbon reflects between-replicate variability at the correct level (N=3), not the misleadingly narrow SEM that would result from computing over all cells.
+- The error band or bars (SD, SEM or 95% CI, chosen in the sidebar and named in the subtitle) reflect between-replicate variability at the correct level (N = number of dishes), not the misleadingly narrow SEM that would result from computing over all cells.
 - **Diverging trajectories are the visual signature of the condition Ã— time interaction** â€” the statistical result you're reporting.
 
 ### Empirical Cumulative Distribution Functions (ECDFs)
@@ -1028,7 +1033,7 @@ If you use CellMorphR in your research, please cite:
   title   = {CellMorphR: Single-Cell Morphometry Analysis Suite for Bacteriophage Infection Experiments},
   year    = {2026},
   url     = {https://github.com/mbaffour/CellMorphR},
-  version = {3.2.0}
+  version = {3.3.0}
 }
 ```
 
