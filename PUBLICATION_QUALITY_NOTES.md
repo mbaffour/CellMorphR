@@ -4,13 +4,38 @@ Audit of CellMorphR's plotting/presentation against a figure-publication rubric,
 plus the safe presentation improvements applied on the `claude/publication-quality`
 branch and the deeper changes deferred as recommendations.
 
+> **Status (3.3.0, 2026-11-04): the R-app rows below are now applied in
+> `CellMorphR_v3.R`.** Until 3.3.0 every row this document marks **Fixed** had
+> been applied only on a `claude/publication-quality` branch against a
+> repository layout (`R-code/`, `python_script/`) that does not exist here, and
+> none of it was in the shipped app. As of 3.3.0 the app has: an Okabe-Ito
+> default condition palette (`default_cond_colors()`, `OKABE_ITO`,
+> `PALETTE_PRESETS`), a per-measurement unit input whose unit appears in the axis
+> titles of the Distributions, Trajectories, Effect Sizes and Pub Figure tabs
+> (`measure_label()`), a user choice of SD / SEM / 95% CI on the
+> Trajectories tab whose subtitle names the measure and the replicate count,
+> and replicate colours that cannot coincide with condition colours
+> (`rep_colors_for()`). Deferred items 1 (per-replicate connectors), 4
+> (colourblind simulation) and 6 (trajectory significance) remain open; item 2
+> is done (units are per measurement, kept with the session); item 5 is done.
+> The Python rows still describe a script that is not in this repository.
+>
+> The statistical findings are tracked separately in
+> [`AUDIT-2026-09.md`](AUDIT-2026-09.md) (finding CM-11 is this document); the
+> corrections landed in 3.2.0 and are described in
+> [`CHANGELOG.md`](CHANGELOG.md).
+
 > **Scope guard.** These changes touch **presentation only**. The statistical
-> methodology — per-replicate summaries, two-way ANOVA on replicate summaries,
-> linear mixed model with replicate as a random effect, Welch pairwise tests,
+> methodology — per-replicate summaries, the global models, Welch pairwise tests,
 > Holm correction, effect sizes, assumption diagnostics — was **not altered**.
 > The tool's anti-pseudoreplication design is its core strength and was left
 > untouched. Statistics were **not re-run/verified** in this pass (no R/Python
 > stats validation was performed here); only plotting was smoke-tested.
+>
+> That disclaimer was accurate, and it is why the 2026-09 statistical audit
+> exists. The claim that the anti-pseudoreplication design was the tool's core
+> strength turned out to be half right: true of the pairwise path, false of both
+> global models, which are corrected in 3.2.0.
 
 ---
 

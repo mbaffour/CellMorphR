@@ -22,7 +22,7 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 
 | Version | App file | Status |
 |---------|----------|--------|
-| **3.1.2** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. |
+| **3.3.0** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, colourblind-safe default palette, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
 Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
@@ -74,8 +74,8 @@ CellMorphR provides publication-ready visualization and statistically rigorous a
 - [Statistical Methodology](#statistical-methodology)
   - [Why Per-Replicate Analysis?](#why-per-replicate-analysis)
   - [The Pseudoreplication Problem](#the-pseudoreplication-problem)
-  - [Two-Way ANOVA on Replicate Summaries](#two-way-anova-on-replicate-summaries)
-  - [Linear Mixed Models (Alternative)](#linear-mixed-models-alternative)
+  - [Repeated-Measures ANOVA on Replicate Summaries](#repeated-measures-anova-on-replicate-summaries)
+  - [Linear Mixed Models (Optional)](#linear-mixed-models-optional)
   - [Pairwise Comparisons](#pairwise-comparisons)
   - [Effect Size Metrics](#effect-size-metrics)
 - [Visualization Philosophy](#visualization-philosophy)
@@ -103,7 +103,18 @@ The tool addresses two critical needs:
 
 2. **Publication-ready visualization** â€” generating figures that simultaneously show single-cell distributions (revealing biological heterogeneity) and replicate-level summaries (showing statistical power honestly).
 
-CellMorphR is available as both an interactive R Shiny application (for exploratory analysis and figure customization) and a Python command-line tool (for batch processing and pipeline integration).
+CellMorphR is available as both an interactive R Shiny application (for
+exploratory analysis and figure customization) and a Python command-line tool
+(for batch processing and pipeline integration).
+
+> **The Python command-line tool is not distributed in this repository.** This
+> repository ships the R Shiny app (`CellMorphR_v3.R`) only; there is no `.py`
+> file here. The Python sections below, the R/Python feature matrix and the
+> cross-implementation reproducibility section describe it for reference and are
+> **not** a description of anything you can run from this checkout. They also
+> predate the 3.2.0 statistical corrections, so the two implementations no longer
+> agree even where both are available — see
+> [`AUDIT-2026-09.md`](AUDIT-2026-09.md) (CM-16).
 
 ---
 
@@ -153,7 +164,7 @@ CellMorphR handles this correctly:
 | Box + strip plots | âœ“ | â€” |
 | ECDF plots | âœ“ | âœ“ |
 | Temporal trajectory plots | âœ“ | âœ“ |
-| Two-way ANOVA | âœ“ | âœ“ |
+| Repeated-measures ANOVA | âœ“ | âœ“ |
 | Linear mixed models | âœ“ | â€” |
 | Pairwise comparisons (Holm-corrected) | âœ“ | âœ“ |
 | Effect size trajectories | âœ“ | âœ“ |
@@ -315,9 +326,10 @@ The sidebar controls everything downstream:
 | Control | What it does |
 |---------|--------------|
 | **Measurement Variable** | Which column all the plots and statistics use |
+| **Measurement unit** | Optional, remembered per measurement (`µm²`, `µm`, `a.u.`); appended to the axis titles on the Distributions, Trajectories, Effect Sizes and Pub Figure tabs, e.g. `Area (µm²)`, or `log(Area [µm²])` under a transform |
 | **Reference (control) condition** | The baseline for effect sizes and "vs control" comparisons |
 | **Data transform** | None / log / sqrt, applied to every measurement |
-| **Colour palette** | 9 presets plus a per-condition colour picker |
+| **Colour palette** | Okabe-Ito (colourblind-safe) by default, 8 other presets including Tol and the pre-3.3 Blue/Red, plus a per-condition colour picker |
 | **Rename samples** | Edit condition names and timepoint labels (see Editing figures below) |
 | **Split Condition into factors** | Turn `pSJExD_gp75_100nM` into a `Condition_Base` plus a numeric `Dose_nM` column, enabling factorial grouping and the trend test |
 | **Save / Resume session** | Write an `.rds` you can reload later |
@@ -339,20 +351,30 @@ dot plot, ridge, ECDF, histogram, stacked quartile bar, pie, donut.
   asterisk) and a separate shape for the individual cell points. The legend
   follows your choice.
 
-**Significance brackets** are optional and off by default. When enabled they use
-the test and correction selected on the Statistics tab, so the figure and the
-tables can never disagree. Brackets are capped per timepoint so a crowded
-experiment stays readable; the caption states how many of the total comparisons
-are shown.
+**Significance brackets** are optional and off by default. They compare
+conditions within each timepoint on the replicate summaries, using the test and
+correction chosen on the Statistics tab, corrected across every
+condition-within-timepoint comparison as one family. The Statistics tab ships
+with the matching comparison mode ("Pairwise within each time point") selected,
+so at the shipped defaults the brackets and the Pairwise table are the same
+family and the same numbers. Move the tab off that configuration and the two
+become different families: the bracket caption then says so, and names what to
+set the tab back to, instead of leaving two p-values for one contrast
+unexplained. Brackets are capped per timepoint so a crowded experiment stays
+readable; the caption states how many of the total comparisons are shown.
 
 Other controls: subset which samples/timepoints appear, swap which variable sits
 on the X axis, log axis, manual Y limits, label angle and wrapping.
 
 ### 3. Trajectories Tab
 
-Replicate summaries over time, with loess or linear trend and SEM ribbons or
-error bars. Each point is one biological replicate; dashed lines connect
-replicates. With no time column this tab explains that there is nothing to plot
+Replicate summaries over time, with loess or linear trend and an error band or
+bars showing your choice of **SD, SEM or 95% CI** across biological replicates
+(never across cells). The subtitle always names the one drawn and the number
+of replicates per group. Each point is one biological replicate; dashed lines
+connect replicates. **Download Plot Data (CSV)** exports the replicate
+summaries together with the group mean, SD, SEM, 95% CI and N behind the
+figure. With no time column this tab explains that there is nothing to plot
 and points you back to Distributions.
 
 ### 4. Morphospace (PCA) Tab
@@ -390,9 +412,16 @@ Sub-tabs: Group Preview, Comparison Preview, Test Suggestion, Descriptive
 statistics, Results, **Pairwise** (with 95% CI, degrees of freedom, effect
 direction and per-comparison warnings), **Trend**, EMM Plot, and About.
 
-An optional global model is available: two-way ANOVA on replicate summaries
-(with partial eta-squared and a Shapiro-Wilk residual check) or a linear mixed
-model with replicate as a random effect and emmeans contrasts.
+An optional global model is available: a **repeated-measures ANOVA** on the
+replicate summaries, which puts the dish in its own error stratum so Condition
+is tested against dish-to-dish variation and Time and Condition x Time against
+the dish x timepoint variation, or a **linear mixed model** on cells with random
+intercepts for dish *and* for dish x timepoint, with emmeans contrasts corrected
+across the whole table as one family. Both name the unit each term was tested
+against and report partial eta-squared or the variance components. Assumption
+diagnostics (Shapiro-Wilk, Levene's test, variance ratio) accompany them and are
+advisory only -- see
+[Repeated-Measures ANOVA on Replicate Summaries](#repeated-measures-anova-on-replicate-summaries).
 
 **Small-n guardrails.** With two replicates per group the app warns you that a
 Wilcoxon test can never reach p < 0.05 (minimum attainable p = 0.33) and that a
@@ -407,14 +436,19 @@ dozens of pairwise tests.
 
 ### 7. Effect Sizes Tab
 
-Absolute difference, percent change, or Cohen's d against the reference
-condition over time, as lines, points, or magnitude-scaled bubbles. P-values
-tell you whether an effect exists; this tab tells you how big it is.
+Absolute difference, percent change, or **Hedges' g** against the reference
+condition over time, as lines, points, or magnitude-scaled bubbles. Hedges' g
+carries a 95% noncentral-t confidence interval, drawn as an error bar on every
+point; with three dishes per group that interval is usually several units wide,
+which is the honest answer and the reason it is shown. Timepoints where a
+condition is absent, or has a single replicate, report "not estimable" with the
+reason instead of stopping the tab. P-values tell you whether an effect exists;
+this tab tells you how big it is and how well determined that size is.
 
 ### 8. Multi-Feature Tab
 
 Runs the analysis across **every** measurement at once: a significance heatmap
-(two-way ANOVA per feature, stars or p-values in the cells), a raw-value heatmap
+(repeated-measures ANOVA per feature, stars or p-values in the cells), a raw-value heatmap
 (optionally z-scored), a spider/radar comparison, a partial eta-squared feature
 importance chart, and a divergence table giving the earliest timepoint at which
 each feature separates from control.
@@ -593,58 +627,155 @@ Pseudoreplication occurs when non-independent observations are analyzed as thoug
 2. Perform all statistical tests on these replicate-level summaries (N=3 per group).
 3. Display both the cell-level data (for biological insight) and replicate-level summaries (for statistical honesty) in every figure.
 
-### Two-Way ANOVA on Replicate Summaries
+### Repeated-Measures ANOVA on Replicate Summaries
 
-The primary analysis is a two-way factorial ANOVA with factors **Condition** (2 levels: Uninfected, +N4) and **Time** (4 levels: 30, 60, 90, 120 min) on the per-replicate medians.
+The default global model is a repeated-measures ANOVA with factors **Condition**
+and **Time** on the per-replicate medians, with the biological replicate — the
+dish — as its own error stratum.
 
-**The ANOVA model:**
+> **Changed in 3.2.0.** Up to v3.1.2 this was a plain two-way ANOVA,
+> `aov(y ~ Condition * Time)`, on the same replicate summaries. In a time course
+> the *same* dishes are imaged at every timepoint, so 3 dishes measured at 5
+> timepoints contributed 15 rows per condition while only 3 independent units
+> existed, and the Condition F-test was built on a residual divided by roughly
+> five times too many degrees of freedom. On null data that produced a **41%**
+> false-positive rate for Condition, where 5% is nominal. See
+> [`AUDIT-2026-09.md`](AUDIT-2026-09.md) (CM-1) and [`CHANGELOG.md`](CHANGELOG.md).
 
-```
-Y_ijk = Âµ + Î±_i + Î²_j + (Î±Î²)_ij + Îµ_ijk
-```
-
-Where:
-- `Y_ijk` = median cell measurement for replicate k in condition i at time j
-- `Âµ` = grand mean
-- `Î±_i` = effect of condition i
-- `Î²_j` = effect of time j
-- `(Î±Î²)_ij` = condition Ã— time interaction
-- `Îµ_ijk` = residual error (between-replicate variability)
-
-**Degrees of freedom:**
-- Condition: `a - 1 = 1`
-- Time: `b - 1 = 3`
-- Interaction: `(a-1)(b-1) = 3`
-- Residual: `N - ab = 24 - 8 = 16`
-
-**Key test:** The **Condition Ã— Time interaction** F-test determines whether the infection effect changes over time. A significant interaction (p < 0.05) means the trajectories diverge â€” the infection effect is time-dependent, consistent with progressive cell enlargement due to lysis inhibition.
-
-**Effect sizes:** Partial eta-squared (Î·Â²_p) is reported for each ANOVA term, quantifying the proportion of variance explained by each factor relative to its own effect plus residual variance. Benchmarks: small = 0.01, medium = 0.06, large = 0.14 (Cohen, 1988). This matches the effect size metric reported by GraphPad Prism, SPSS, and JMP.
-
-**Assumption diagnostics:** CellMorphR automatically tests both key ANOVA assumptions and reports results in the Statistics tab and downloaded files:
-
-1. **Normality of residuals:** Shapiro-Wilk test (Shapiro & Wilk, 1965). With N=3 per cell, this test has low power, but ANOVA is robust to moderate non-normality with balanced designs (Maxwell & Delaney, 2004).
-2. **Homogeneity of variance:** Levene's test with median centering (Brown & Forsythe, 1974) â€” the same test used by GraphPad Prism. ANOVA is fairly robust to this violation with balanced designs.
-
-If either assumption is severely violated, users should consider data transformation (e.g., log-transformation for positively skewed cell size data) or non-parametric alternatives.
-
-### Linear Mixed Models (Alternative)
-
-The R Shiny app also supports a linear mixed model (LMM) that analyzes all cell-level data while correctly partitioning variance:
+**The model:**
 
 ```
-Measurement ~ Condition * Time + (1|Rep_unique)
+median_val ~ Condition * Time + Error(Rep_unique)
 ```
 
-The random intercept `(1|Rep_unique)` accounts for the fact that cells within the same dish are correlated. This approach is more statistically powerful than the ANOVA on replicate summaries because it uses all cell-level information and correctly weights replicates with unequal cell counts. However, it assumes normally distributed residuals and random effects, which may not hold for skewed cell size data (consider log-transformation if using LMM).
+`Rep_unique` is the dish, identified uniquely per condition (see
+[unique replicate identifiers](#linear-mixed-models-optional) below). The error
+stratum splits the analysis in two, because the two kinds of term have two
+different error terms:
 
-**Important implementation detail â€” unique replicate identifiers:** In many datasets, biological replicates are numbered 1, 2, 3 within each condition. Replicate "1" in Uninfected is a *different dish* from Replicate "1" in +N4. If replicate IDs are passed directly to the random effect term `(1|Replicate)`, the model incorrectly treats cross-condition replicates sharing the same number as the same random-effect group â€” causing model convergence failures or incorrect variance estimates. CellMorphR automatically creates unique replicate identifiers by combining condition and replicate number (e.g., `Uninfected.1`, `Uninfected.2`, `+N4.1`, `+N4.2`, etc.) before fitting the model.
+| Term | Varies | Tested against | DenDF for 2 conditions × 3 dishes × 4 times |
+|---|---|---|---|
+| Condition | between dishes | dish-to-dish variation | 4 |
+| Time | within a dish | dish × timepoint variation | 12 |
+| Condition × Time | within a dish | dish × timepoint variation | 12 |
 
-**P-values in the ANOVA table:** Base `lme4::lmer()` does not produce p-values for fixed effects by default because the appropriate denominator degrees of freedom for F-tests in mixed models are debated. CellMorphR uses `lmerTest::lmer()` when available, which provides Satterthwaite-approximated degrees of freedom and p-values â€” the most widely accepted approach in biological sciences. Install `lmerTest` alongside `lme4` for complete output:
+Earlier versions of this document gave a single residual of `N - ab = 24 - 8 =
+16` for that design. There are 6 dishes in it, not 24 independent units, and the
+three terms do not share one error term. The Statistics tab now prints the error
+stratum and the denominator df beside every term, so the unit each test actually
+used is visible rather than inferred.
+
+`Time` is deliberately not nested further (`Error(Rep_unique/Time_fac)`): there
+is exactly one summary value per dish per timepoint, so that stratum would be
+left with zero residual degrees of freedom and no p-values at all.
+
+**Degenerate designs.** With a single timepoint the design collapses to a one-way
+ANOVA over dishes — which already has the dish as its unit — and the output says
+so. Where there are no more replicate groups than conditions there is no
+dish-to-dish variation left to test Condition against, and the app reports that
+instead of fitting a model.
+
+**Effect sizes:** Partial eta-squared (η²_p) is reported for each ANOVA term,
+relative to that term's own error stratum, quantifying the proportion of variance
+explained by each factor relative to its own effect plus its residual variance.
+Benchmarks: small = 0.01, medium = 0.06, large = 0.14 (Cohen, 1988).
+
+**Assumption diagnostics:** CellMorphR reports three diagnostics, computed on the
+same replicate-level unit the tests use, in the Statistics tab and in the
+downloaded report:
+
+1. **Normality of residuals:** Shapiro-Wilk test (Shapiro & Wilk, 1965). With
+   N=3 per cell this test has low power, but ANOVA is robust to moderate
+   non-normality with balanced designs (Maxwell & Delaney, 2004).
+2. **Homogeneity of variance:** Levene's test with median centering (Brown &
+   Forsythe, 1974) — the same test used by GraphPad Prism. Implemented in base R
+   and checked against `car::leveneTest` in the test suite.
+3. **Variance ratio:** the largest group SD over the smallest, which is usually
+   the more readable of the two.
+
+These are **advisory only**. CellMorphR does not switch test on the strength of
+them — the test you selected is the test that runs — and the report says so
+rather than implying otherwise. If an assumption looks severely violated,
+consider a transform (log, for positively skewed cell size data) or the
+rank-based alternative; that decision stays with you.
+
+### Linear Mixed Models (Optional)
+
+The R Shiny app also supports a linear mixed model (LMM) that analyzes all
+cell-level data while correctly partitioning variance:
+
+```
+Measurement ~ Condition * Time + (1|Rep_unique) + (1|Rep_unique:Time_fac)
+```
+
+> **Changed in 3.2.0.** The model was previously
+> `Measurement ~ Condition * Time + (1|Rep_unique)`. A random *intercept* per
+> dish absorbs only what is constant across the whole time course, so the
+> Condition test was correctly protected (DenDF 4 for 6 dishes) while `Time` and
+> `Condition × Time` — which vary *within* a dish — fell back on the cell-level
+> residual: DenDF in the thousands, i.e. the cell count. Once dishes drift over
+> time, as they do in any time-lapse, that gave measured false-positive rates of
+> **99%** and **100%** on null data. See
+> [`AUDIT-2026-09.md`](AUDIT-2026-09.md) (CM-2).
+
+The two random terms do different jobs:
+
+- `(1|Rep_unique)` — cells within the same dish are correlated. This protects the
+  `Condition` test.
+- `(1|Rep_unique:Time_fac)` — each dish has its own offset at each timepoint
+  (focus drift, medium evaporation, per-session segmentation quality). This is
+  the error term `Time` and `Condition × Time` belong to, and it is what protects
+  them.
+
+The dish × timepoint term is only estimable when dishes are measured at more than
+one timepoint with more than one cell per dish per timepoint. Where it is not, it
+is dropped and the report says plainly what that costs, and points at the
+repeated-measures ANOVA instead.
+
+Used within its assumptions the LMM makes fuller use of the data than the ANOVA
+on summaries, because it uses all cell-level information and weights replicates
+with unequal cell counts. It does assume normally distributed residuals and
+random effects, which may not hold for skewed cell size data — consider a log
+transform.
+
+**Singular fits.** When a variance component is estimated at exactly zero the fit
+is reported, not silently replaced: the report names which term collapsed, notes
+that the resulting tests are conservative rather than wrong, and points at the
+repeated-measures ANOVA as the model to trust. (Up to v3.1.2 this branch returned
+nothing while announcing "Falling back to Two-way ANOVA" — and no ANOVA was ever
+computed, so the report promised a global model and then showed none. Audit
+CM-7.)
+
+**Important implementation detail — unique replicate identifiers:** In many
+datasets, biological replicates are numbered 1, 2, 3 within each condition.
+Replicate "1" in Uninfected is a *different dish* from Replicate "1" in +N4. If
+replicate IDs are passed directly to the random effect term `(1|Replicate)`, the
+model incorrectly treats cross-condition replicates sharing the same number as
+the same random-effect group — causing model convergence failures or incorrect
+variance estimates. CellMorphR automatically creates unique replicate identifiers
+by combining condition and replicate number (e.g., `Uninfected.1`,
+`Uninfected.2`, `+N4.1`, `+N4.2`) before fitting the model. The same identifier
+is the error stratum in the repeated-measures ANOVA.
+
+**P-values in the ANOVA table:** Base `lme4::lmer()` does not produce p-values for
+fixed effects by default because the appropriate denominator degrees of freedom
+for F-tests in mixed models are debated. CellMorphR uses `lmerTest::lmer()` when
+available, which provides Satterthwaite-approximated degrees of freedom and
+p-values — the most widely accepted approach in biological sciences. Without
+`lmerTest` the table has no p-value column at all, and the report says so.
+Install it alongside `lme4` for complete output:
 
 ```r
 install.packages(c("lme4", "lmerTest", "emmeans"))
 ```
+
+**emmeans contrasts.** Condition contrasts at each timepoint are taken from the
+fitted model on Kenward-Roger degrees of freedom, pulled *unadjusted*, and then
+corrected here across the whole table as one family, with the family size stated
+in the output. Previously `emmeans(model, ~ Condition | Time_fac)` made the
+timepoint a `by` variable, so `adjust = "holm"` corrected within each timepoint
+separately — one contrast per stratum with two conditions, i.e. no correction at
+all, printed under a "holm" label (audit CM-8).
 
 ### Pairwise Comparisons
 
@@ -654,7 +785,7 @@ When the interaction is significant, pairwise comparisons at each time point ide
   - **Unequal variances are biologically expected.** Infected cells exhibit progressively higher variance as some cells filament while others do not. The equal-variance assumption of Student's t-test is violated.
   - **With N=3, equal variance cannot be verified.** Levene's test or Bartlett's test have negligible power at N=3, so assuming equal variance is unjustified.
   - **Welch's is the recommended default.** It reduces to Student's t-test when variances are equal, but does not produce inflated Type I error rates when they are not. Major journals and statistical guidelines (e.g., Ruxton 2006, *Behavioral Ecology*) recommend Welch's as the default for two-sample comparisons.
-- P-values are adjusted using the **Holm-Bonferroni** method to control the family-wise error rate across the 4 time-point comparisons.
+- P-values are adjusted using the **Holm-Bonferroni** method (or Benjamini-Hochberg, Bonferroni, or none, at your choice) to control the family-wise error rate across **every comparison in the table, as one family**. The family size is stated in the output. Both the Pairwise table and the emmeans contrasts define the family this way; so do the figure brackets at the shipped defaults.
 - Significance is reported as: ns (p â‰¥ 0.05), * (p < 0.05), ** (p < 0.01), *** (p < 0.001).
 
 **Expected pattern for lysis inhibition:**
@@ -664,13 +795,34 @@ When the interaction is significant, pairwise comparisons at each time point ide
 
 ### Effect Size Metrics
 
-CellMorphR computes three effect size metrics at each time point:
+CellMorphR computes three effect size metrics at each time point, all on
+replicate-level summaries:
 
-1. **Absolute difference**: `mean(Treatment medians) - mean(Control medians)`. In the original measurement units (e.g., ÂµmÂ²).
+1. **Absolute difference**: `mean(Treatment medians) - mean(Control medians)`. In
+   the original measurement units (e.g., µm²).
 
-2. **Percent change**: `(Treatment - Control) / Control Ã— 100`. Scale-free and intuitive for reporting.
+2. **Percent change**: `(Treatment - Control) / Control × 100`. Scale-free and
+   intuitive for reporting.
 
-3. **Cohen's d**: `(Treatment - Control) / pooled_SD`, where `pooled_SD = âˆš[(SD_ctrlÂ² + SD_trtÂ²) / 2]` computed over replicate-level summaries. Standardized effect size independent of measurement scale and variability.
+3. **Hedges' g**: `J × (Treatment - Control) / pooled_SD`, where
+   `pooled_SD = √[((n₁-1)·SD_ctrl² + (n₂-1)·SD_trt²) / (n₁+n₂-2)]` and
+   `J = 1 - 3/(4(n₁+n₂-2)-1)` is Hedges' small-sample correction. Reported with a
+   95% **noncentral-t confidence interval**, drawn as an error bar on every point
+   and carried into the table and the CSV export.
+
+> **Changed in 3.2.0.** This was an uncorrected Cohen's d over
+> `pooled_SD = √[(SD_ctrl² + SD_trt²)/2]` — the unweighted average of the
+> variances, which is the pooled SD only when the two groups have equal n — with
+> no interval, while the plot drew dotted "large effect" guides at ±0.8 across
+> the top of it. At n = 3 vs 3, J = 0.80, so every d reported was 25% larger than
+> the unbiased estimate. The ±0.8 guides remain, but only alongside the interval
+> and with a caption saying they are Cohen's conventional benchmark rather than a
+> threshold for your experiment. Audit CM-3.
+
+Where a condition is absent at a timepoint, or has a single replicate, g is
+reported as not estimable with the reason, and the count of such timepoints
+appears in the subtitle. Previously that case reached `if (NA > 0)` and replaced
+the plot, the table and the download button with an R error block (audit CM-4).
 
 ---
 
@@ -701,7 +853,7 @@ CellMorphR offers 7 distribution plot styles (R Shiny) or 5 styles (Python) to s
 **Why this design:**
 - Each point is one biological replicate â€” the unit of statistical inference. Connecting points from the same replicate across time (dashed lines) shows individual trajectories.
 - The smooth trend line (loess) captures the overall temporal pattern per condition.
-- The SEM ribbon reflects between-replicate variability at the correct level (N=3), not the misleadingly narrow SEM that would result from computing over all cells.
+- The error band or bars (SD, SEM or 95% CI, chosen in the sidebar and named in the subtitle) reflect between-replicate variability at the correct level (N = number of dishes), not the misleadingly narrow SEM that would result from computing over all cells.
 - **Diverging trajectories are the visual signature of the condition Ã— time interaction** â€” the statistical result you're reporting.
 
 ### Empirical Cumulative Distribution Functions (ECDFs)
@@ -784,15 +936,26 @@ CellMorphR is designed for the following experimental structure:
 - At least ~30 cells per replicate (for stable median/mean estimation).
 
 **Limitations:**
-- The two-way ANOVA assumes equal variance across groups (homoscedasticity). Cell size distributions in phage infection experiments often become more variable over time in infected conditions. Log-transformation may help if this is severe.
-- With N=3 replicates per group and 16 residual degrees of freedom, statistical power is limited. Prioritize effect sizes and biological consistency over p-values.
+- The repeated-measures ANOVA assumes equal variance across groups (homoscedasticity), and sphericity across timepoints, for which no correction is applied. Cell size distributions in phage infection experiments often become more variable over time in infected conditions. Log-transformation may help if this is severe.
+- With N=3 replicates per group the global model has 4 denominator degrees of freedom for Condition, not 16, and power is correspondingly limited. This is the honest number. Prioritize effect sizes with their intervals, and biological consistency, over p-values.
 - The app does not currently support more complex designs (e.g., nested random effects for imaging plates, split-plot designs, or longitudinal within-replicate tracking).
 
 ---
 
 ## Cross-Implementation Reproducibility
 
-Both the R Shiny app and the Python command-line tool implement identical statistical methods and produce identical numerical results when given the same input data. This ensures that the choice of tool does not affect reported findings.
+> **Out of date as of 3.2.0, and unverifiable from this repository.** The
+> Python script is not present in this checkout (see the note in
+> [Overview](#overview)), and the R implementation's global models, effect sizes
+> and multiplicity families all changed in 3.2.0. Any Python implementation
+> written against the description below will **not** reproduce current R output.
+> Treat this section as a record of the pre-3.2.0 intent until the Python tool is
+> shipped and revalidated against the corrected R models.
+
+The intent was that both the R Shiny app and the Python command-line tool
+implement identical statistical methods and produce identical numerical results
+when given the same input data, so that the choice of tool does not affect
+reported findings.
 
 ### Verified Equivalences
 
@@ -870,7 +1033,7 @@ If you use CellMorphR in your research, please cite:
   title   = {CellMorphR: Single-Cell Morphometry Analysis Suite for Bacteriophage Infection Experiments},
   year    = {2026},
   url     = {https://github.com/mbaffour/CellMorphR},
-  version = {3.1.2}
+  version = {3.3.0}
 }
 ```
 

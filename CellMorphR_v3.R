@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.1.2
+# Version 3.3.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.1.2.
+#   anti-pseudoreplication statistics. Version 3.3.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.1.2"
+APP_VERSION <- "3.3.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -177,8 +177,22 @@ validate_data <- function(df, col_map = NULL) {
   if (cond_col != "Condition") { df2$Condition <- df2[[cond_col]] }
   if (synthetic_time) {
     df2$Time_min <- 0
-  } else if (time_col != "Time_min") {
-    df2$Time_min <- suppressWarnings(as.numeric(df2[[time_col]]))
+  } else {
+    # Always coerce, including when the column is already called Time_min. Files
+    # with values like "30 min", "T30" or "0.5 h" used to stay character, which
+    # made every downstream sort lexical: 0, 120, 30, 60 (audit CM-17).
+    raw_time <- df2[[time_col]]
+    coerced <- suppressWarnings(as.numeric(as.character(raw_time)))
+    if (all(is.na(coerced)) && any(!is.na(raw_time) & nzchar(trimws(as.character(raw_time))))) {
+      return(list(
+        ok = FALSE, needs_mapping = TRUE,
+        msg = paste0("The time column \"", time_col, "\" is not numeric -- values such as \"",
+                     paste(utils::head(unique(stats::na.omit(as.character(raw_time))), 3), collapse = "\", \""),
+                     "\" could not be read as minutes.\nStrip the units (use 30, not \"30 min\"), ",
+                     "or map a different column to the time role below."),
+        cond_col = cond_col, time_col = time_col, rep_col = rep_col, all_cols = nms))
+    }
+    df2$Time_min <- coerced
   }
   if (rep_col  != "Replicate") { df2$Replicate <- df2[[rep_col]] }
 
@@ -186,25 +200,43 @@ validate_data <- function(df, col_map = NULL) {
   meta_cols <- unique(c("Condition", "Time_min", "Replicate",
                          cond_col, time_col, rep_col,
                          "Image", "Cell_ID", "ID"))
-  meta_cols <- meta_cols[!vapply(meta_cols, is.null, logical(1))]
   measure_cols <- setdiff(nms, meta_cols)
-  measure_cols <- measure_cols[sapply(df2[measure_cols], function(x) is.numeric(x))]
+  # vapply, not sapply: sapply(character(0), ...) returns list(), and indexing a
+  # character vector by a list is a hard error -- so the friendly "no numeric
+  # measurement columns" message below used to be unreachable in exactly the
+  # case it was written for (audit CM-5).
+  numeric_flag <- vapply(measure_cols, function(m) is.numeric(df2[[m]]), logical(1))
+  looks_numeric_but_is_not <- measure_cols[!numeric_flag & vapply(measure_cols, function(m) {
+    v <- as.character(df2[[m]])
+    v <- v[!is.na(v) & nzchar(trimws(v))]
+    length(v) > 0 && mean(!is.na(suppressWarnings(as.numeric(v)))) > 0.5
+  }, logical(1))]
+  measure_cols <- measure_cols[numeric_flag]
   id_pattern <- grepl("^id$|_id$|^id_|cell.?id|object.?id|label$|^index$", measure_cols, ignore.case = TRUE)
   measure_cols <- measure_cols[!id_pattern]
   # Also exclude constant columns
-  measure_cols <- measure_cols[sapply(measure_cols, function(m) {
+  measure_cols <- measure_cols[vapply(measure_cols, function(m) {
     v <- df2[[m]]; length(unique(na.omit(v))) > 1
-  })]
+  }, logical(1))]
+
+  parse_warning <- if (length(looks_numeric_but_is_not) > 0)
+    paste0("These columns look numeric but were read as text, so they are not available as measurements: ",
+           paste(looks_numeric_but_is_not, collapse = ", "),
+           ". Values such as \"n/a\", \"NA (auto)\", \"#DIV/0!\" or a unit suffix make a whole column text.")
+  else NULL
 
   if (length(measure_cols) == 0) {
     return(list(ok = FALSE, needs_mapping = FALSE,
-                msg = "No numeric measurement columns found. All numeric columns are constant or excluded."))
+                msg = paste(c("No numeric measurement columns found. All numeric columns are constant or excluded.",
+                              parse_warning), collapse = "\n")))
   }
 
   list(ok = TRUE, needs_mapping = FALSE,
-       msg = if (synthetic_time)
-               "Data loaded successfully. No time column found - samples will be compared directly."
-             else "Data loaded successfully.",
+       msg = paste(c(if (synthetic_time)
+                       "Data loaded successfully. No time column found - samples will be compared directly."
+                     else "Data loaded successfully.",
+                     parse_warning), collapse = "\n"),
+       parse_warning = parse_warning,
        measures = measure_cols, df = df2, synthetic_time = synthetic_time,
        cond_col = cond_col, time_col = time_col, rep_col = rep_col)
 }
@@ -224,16 +256,33 @@ compute_replicate_summaries <- function(df, measure) {
 }
 
 compute_condition_summaries <- function(rep_summary) {
+  # Every spread measure here is computed ACROSS biological replicates (one value
+  # per dish), never across cells: sd_* is the dish-to-dish SD, sem_* that SD
+  # over sqrt(N dishes), and ci95_* the half-width of the 95% t interval on the
+  # replicate values (NA with a single dish). The Trajectories tab lets the user
+  # pick which of the three its band/bars show and states the choice in the
+  # subtitle, so none of them is ever drawn unlabelled.
   rep_summary %>%
     group_by(Condition, Time_min) %>%
     summarise(
       grand_median = mean(median_val),
       grand_mean   = mean(mean_val),
+      sd_median    = sd(median_val),
+      sd_mean      = sd(mean_val),
       sem_median   = sd(median_val) / sqrt(n()),
       sem_mean     = sd(mean_val) / sqrt(n()),
       n_reps       = n(),
       .groups      = "drop"
+    ) %>%
+    mutate(
+      ci95_median = ifelse(n_reps > 1, qt(0.975, pmax(n_reps - 1, 1)) * sem_median, NA_real_),
+      ci95_mean   = ifelse(n_reps > 1, qt(0.975, pmax(n_reps - 1, 1)) * sem_mean,   NA_real_)
     )
+}
+
+# Human-readable name of a spread measure, for subtitles and captions.
+error_measure_label <- function(kind) {
+  switch(kind, sem = "SEM", sd = "SD", ci95 = "95% CI", kind)
 }
 
 
@@ -335,6 +384,47 @@ SHAPE_CHOICES <- c(
 )
 DEFAULT_REP_SHAPES <- c(21, 22, 24, 23, 25)
 
+# =============================================================================
+# CONDITION AND REPLICATE COLOURS
+# Okabe-Ito is safe for the common forms of colour blindness and stays legible
+# when a figure is printed in greyscale. Conditions default to it (3.3.0; the
+# old default was a blue/red pair for two conditions and ggplot's rainbow
+# hue_pal() beyond that, neither of which is colourblind-safe). The vector is
+# reordered so a two-group experiment gets blue vs vermillion.
+# Replicates that are coloured individually ("Color individual cells by
+# replicate") take the Okabe-Ito colours the conditions are NOT using, so a
+# replicate can never be mistaken for a condition on the same figure.
+# =============================================================================
+OKABE_ITO <- c("#0072B2", "#D55E00", "#009E73", "#E69F00",
+               "#CC79A7", "#56B4E9", "#F0E442", "#999999")
+
+default_cond_colors <- function(n) {
+  n <- max(1L, as.integer(n))
+  if (n <= length(OKABE_ITO)) OKABE_ITO[seq_len(n)]
+  else scales::viridis_pal(option = "D", end = 0.92)(n)
+}
+
+rep_colors_for <- function(rep_levels, cond_cols) {
+  rep_levels <- as.character(rep_levels)
+  free <- setdiff(toupper(OKABE_ITO), toupper(as.character(cond_cols)))
+  free <- free[free != "#F0E442"]           # yellow vanishes at cell-point size
+  pool <- c(free, "#000000", "#4B4B4B", "#8C8C8C", "#C0C0C0")
+  setNames(rep(pool, length.out = max(1, length(rep_levels))), rep_levels)
+}
+
+# Quick-palette presets offered on the Data tab. The first entry is the default.
+PALETTE_PRESETS <- list(
+  "Okabe-Ito (colourblind-safe)"  = OKABE_ITO,
+  "Tol bright (colourblind-safe)" = c("#0077bb","#ee7733","#009988","#cc3311","#33bbee","#ee3377","#bbbbbb","#000000"),
+  "Viridis"                       = c("#440154","#31688e","#35b779","#fde725","#21918c","#5ec962","#90d743","#c8e020"),
+  "Blue/Red (pre-3.3 default)"    = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C","#1ABC9C","#F39C12"),
+  "Teal/Orange"                   = c("#2a9d8f","#e76f51","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
+  "Pastel"                        = c("#aec6cf","#ffb7b2","#b5ead7","#ffdac1","#c7ceea","#ff9aa2","#e2f0cb","#f8c8d4"),
+  "Bold"                          = c("#e63946","#2a9d8f","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
+  "Publication"                   = c("#0077b6","#e63946","#2a9d8f","#f4a261","#6a0dad","#e9c46a","#264653","#f77f00"),
+  "Grayscale"                     = paste0("grey", round(seq(20, 80, length.out = 8)))
+)
+
 # Split Condition labels like "pSJExD_gp75_100nM" into a numeric dose column
 # plus a base-label column (and generic part columns), so gradient designs can
 # be analyzed as vector x dose instead of N unrelated groups.
@@ -408,8 +498,11 @@ compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
       }
     }
   }
+  n_family <- nrow(sig_annot)
   if (nrow(sig_annot) > 0) {
     corr <- if (is.null(correction) || correction == "none") "none" else correction
+    # The family is every condition-within-timepoint comparison drawn on this
+    # figure, adjusted together and BEFORE the display truncation below.
     sig_annot$p_adj <- if (corr == "none") sig_annot$p_raw else p.adjust(sig_annot$p_raw, method = corr)
     sig_annot$stars <- ifelse(sig_annot$p_adj < 0.001, "***",
                          ifelse(sig_annot$p_adj < 0.01, "**",
@@ -446,7 +539,10 @@ compute_sig_table <- function(rs, pairs_list, times, sig_yvar = "median_val",
     "holm" = "Holm", "BH" = "Benjamini-Hochberg", "bonferroni" = "Bonferroni", "none" = "uncorrected", correction)
   unit_label <- if (sig_yvar == "mean_val") "replicate means" else "replicate medians"
   caption <- paste0(test_name, " on ", unit_label,
-    if (corr_name == "uncorrected") ", uncorrected" else paste0(", ", corr_name, "-corrected"),
+    if (corr_name == "uncorrected") ", uncorrected"
+    else paste0(", ", corr_name, "-corrected across all ", n_family,
+                " condition-within-timepoint comparison", if (n_family == 1) "" else "s",
+                " (one family)"),
     ". * p<0.05, ** p<0.01, *** p<0.001.")
   warn <- character(0)
   if (wilcox_impossible) warn <- c(warn,
@@ -479,7 +575,28 @@ compute_flexible_replicate_summary <- function(df, measure, group_cols, yvar = "
   out
 }
 
-build_comparison_table <- function(rep_df, mode = "vs_reference", reference_group = NULL) {
+# The stratified modes need their stratum column to be one of the grouping
+# columns. Up to v3.1.2 a request for "within each time point" with Time_min
+# unchecked fell through to vs_reference against an arbitrary first group, while
+# the report still printed the mode the user asked for (audit CM-9). The mode
+# actually built is now returned on the table as the "realised_mode" attribute,
+# together with a "mode_message" explaining any downgrade, and the callers
+# report that rather than the request.
+build_comparison_table <- function(rep_df, mode = "vs_reference", reference_group = NULL,
+                                   strict = FALSE) {
+  requested_mode <- mode
+  mode_message <- NULL
+  needs <- c(within_time = "Time_min", within_condition = "Condition")[mode]
+  if (!is.na(needs) && !needs %in% names(rep_df)) {
+    msg <- paste0("Comparison mode \"", mode, "\" needs ", needs,
+                  " to be one of the grouping columns, but the statistical groups are built from ",
+                  paste(setdiff(names(rep_df), c("Statistics_Group", "Replicate", "Stat_Value",
+                                                 "median_val", "mean_val", "sd_val", "iqr_val",
+                                                 "n_cells")), collapse = " + "), ".")
+    if (strict) stop(msg, call. = FALSE)
+    mode <- "vs_reference"
+    mode_message <- paste(msg, "Fell back to comparing every group against the reference.")
+  }
   groups <- sort(unique(as.character(rep_df$Statistics_Group)))
   if (length(groups) < 2) return(data.frame())
 
@@ -515,7 +632,16 @@ build_comparison_table <- function(rep_df, mode = "vs_reference", reference_grou
   if (is.null(pair_df) || nrow(pair_df) == 0) return(data.frame())
   pair_df <- unique(pair_df)
   pair_df$Comparison_ID <- seq_len(nrow(pair_df))
-  pair_df[, c("Comparison_ID", "Stratum", "Group_1", "Group_2")]
+  out <- pair_df[, c("Comparison_ID", "Stratum", "Group_1", "Group_2")]
+  attr(out, "requested_mode") <- requested_mode
+  attr(out, "realised_mode")  <- mode
+  attr(out, "mode_message")   <- mode_message
+  out
+}
+
+#' The comparison mode actually built, for reports. Never echoes the request.
+realised_comparison_mode <- function(comparison_tbl, fallback = NA_character_) {
+  attr(comparison_tbl, "realised_mode") %||% fallback
 }
 
 run_pairwise_tests <- function(rep_df, comparison_tbl, yvar = "Stat_Value",
@@ -586,6 +712,147 @@ run_pairwise_tests <- function(rep_df, comparison_tbl, yvar = "Stat_Value",
     res$p_adj_fmt <- format_p_value(res$p_adj)
   }
   res
+}
+
+# =============================================================================
+# STANDARDISED EFFECT SIZE
+# =============================================================================
+# Up to v3.1.2 the Effect Sizes tab reported a raw Cohen's d computed with
+# sqrt((var1 + var2)/2) -- the unweighted average, which is only the pooled SD
+# when the two groups have equal n -- with no small-sample correction and no
+# confidence interval, while the figure drew dotted "large effect" guides at
+# +/-0.8 (audit CM-3). At n = 3 vs 3 that d is 25% larger than the unbiased
+# estimate. This computes Hedges' g instead: correctly pooled SD, Hedges'
+# small-sample correction J, and a noncentral-t confidence interval, which at
+# n = 3 is wide enough to make the point that three dishes cannot establish
+# "large effect".
+
+hedges_g <- function(ctrl, trt, conf_level = 0.95) {
+  ctrl <- ctrl[is.finite(ctrl)]; trt <- trt[is.finite(trt)]
+  n1 <- length(ctrl); n2 <- length(trt)
+  blank <- function(note) list(g = NA_real_, d = NA_real_, ci_low = NA_real_, ci_high = NA_real_,
+                               pooled_sd = NA_real_, J = NA_real_, n_ctrl = n1, n_trt = n2,
+                               conf_level = conf_level, note = note)
+  if (n1 < 2 || n2 < 2) {
+    return(blank(paste0("Not estimable: needs at least 2 biological replicates per group (got ",
+                        n1, " and ", n2, ").")))
+  }
+  df <- n1 + n2 - 2
+  # (n-1)-weighted pooled SD: valid for unequal n, unlike the average of variances.
+  s_pool <- sqrt(((n1 - 1) * var(ctrl) + (n2 - 1) * var(trt)) / df)
+  if (!is.finite(s_pool) || s_pool <= 0) {
+    return(blank("Not estimable: the pooled standard deviation is zero (all replicates identical)."))
+  }
+  d <- (mean(trt) - mean(ctrl)) / s_pool
+  J <- 1 - 3 / (4 * df - 1)            # Hedges' small-sample correction
+  g <- J * d
+
+  # Noncentral-t interval: invert the distribution of the observed t statistic.
+  nfac <- sqrt((n1 * n2) / (n1 + n2))
+  t_obs <- d * nfac
+  alpha <- (1 - conf_level) / 2
+  solve_ncp <- function(target) {
+    # pt() warns about precision at the extremes of the bracket; that is noise
+    # from the search, not from the answer uniroot converges on.
+    f <- function(ncp) suppressWarnings(pt(t_obs, df, ncp)) - target
+    lo <- t_obs - 10 * max(1, abs(t_obs)) - 10
+    hi <- t_obs + 10 * max(1, abs(t_obs)) + 10
+    tryCatch(uniroot(f, c(lo, hi), tol = 1e-6)$root, error = function(e) NA_real_)
+  }
+  ncp_hi <- solve_ncp(alpha)          # upper limit
+  ncp_lo <- solve_ncp(1 - alpha)      # lower limit
+  list(g = g, d = d,
+       ci_low  = J * ncp_lo / nfac,
+       ci_high = J * ncp_hi / nfac,
+       pooled_sd = s_pool, J = J, n_ctrl = n1, n_trt = n2, conf_level = conf_level,
+       note = if (min(n1, n2) < 4)
+         paste0("Based on ", n1, " and ", n2,
+                " biological replicates: the interval is very wide and a point estimate alone is not interpretable.")
+       else NA_character_)
+}
+
+# =============================================================================
+# ASSUMPTION DIAGNOSTICS (advisory only -- they never change the test that runs)
+# =============================================================================
+# The README has always documented a Levene test; until v3.2.0 none existed
+# (audit CM-12), and Shapiro-Wilk was printed without any statement of what it
+# did or did not do (audit CM-18). Both are computed here, on the same unit the
+# tests use, and both are labelled advisory: nothing in the app switches test on
+# the strength of them. Deciding to transform, or to move to the rank-based
+# test, stays with the user.
+
+#' Levene's test with median centering (Brown & Forsythe 1974), base R only.
+levene_test <- function(y, group) {
+  ok <- !is.na(y) & !is.na(group)
+  y <- as.numeric(y[ok]); group <- droplevels(factor(group[ok]))
+  if (nlevels(group) < 2) return(NULL)
+  counts <- table(group)
+  if (any(counts < 2)) return(NULL)
+  centres <- tapply(y, group, median, na.rm = TRUE)
+  z <- abs(y - centres[as.character(group)])
+  if (all(abs(z - z[1]) < .Machine$double.eps^0.5)) return(NULL)  # no spread at all
+  fit <- tryCatch(anova(lm(z ~ group)), error = function(e) NULL)
+  if (is.null(fit)) return(NULL)
+  list(statistic = fit[["F value"]][1], df1 = fit[["Df"]][1], df2 = fit[["Df"]][2],
+       p.value = fit[["Pr(>F)"]][1], n_groups = nlevels(group),
+       method = "Levene's test with median centering (Brown & Forsythe, 1974)")
+}
+
+#' Largest / smallest group SD. A ratio above ~3 is the usual rule of thumb for
+#' variance heterogeneity that Welch's test handles and a pooled test does not.
+variance_ratio <- function(y, group) {
+  ok <- !is.na(y) & !is.na(group)
+  y <- as.numeric(y[ok]); group <- droplevels(factor(group[ok]))
+  if (nlevels(group) < 2) return(NULL)
+  sds <- tapply(y, group, sd)
+  sds <- sds[is.finite(sds) & sds > 0]
+  if (length(sds) < 2) return(NULL)
+  list(ratio = max(sds) / min(sds), min_sd = min(sds), max_sd = max(sds),
+       min_group = names(sds)[which.min(sds)], max_group = names(sds)[which.max(sds)])
+}
+
+#' Run the advisory diagnostics on a set of replicate-level summaries.
+assumption_diagnostics <- function(rep_df, yvar = "Stat_Value", group_col = "Statistics_Group",
+                                   residuals = NULL) {
+  if (is.null(rep_df) || nrow(rep_df) == 0 || !yvar %in% names(rep_df)) return(NULL)
+  y <- rep_df[[yvar]]; g <- rep_df[[group_col]]
+  sw_input <- if (!is.null(residuals)) residuals else
+    unlist(lapply(split(y, g), function(v) v - mean(v, na.rm = TRUE)), use.names = FALSE)
+  sw_input <- sw_input[is.finite(sw_input)]
+  shapiro <- if (length(sw_input) >= 3 && length(unique(sw_input)) > 1)
+    tryCatch(shapiro.test(sw_input), error = function(e) NULL) else NULL
+  list(
+    shapiro = shapiro,
+    shapiro_on = if (!is.null(residuals)) "model residuals" else "within-group centred replicate summaries",
+    levene = levene_test(y, g),
+    variance_ratio = variance_ratio(y, g),
+    advisory = paste(
+      "These diagnostics are ADVISORY. CellMorphR does not switch test on them:",
+      "the test you selected is the test that was run. Use them to decide whether to",
+      "transform the data (Data tab) or to choose the Wilcoxon rank-sum test."
+    )
+  )
+}
+
+#' Printable block for the Statistics output and the downloaded report.
+format_assumption_diagnostics <- function(d) {
+  if (is.null(d)) return("Assumption diagnostics: not available for these groups.")
+  out <- character(0)
+  if (!is.null(d$shapiro)) {
+    out <- c(out, sprintf("Normality  -- Shapiro-Wilk on %s: W = %.4f, p = %s",
+                          d$shapiro_on, d$shapiro$statistic, format_p_value(d$shapiro$p.value)))
+  } else out <- c(out, "Normality  -- Shapiro-Wilk: not computable (too few or constant values).")
+  if (!is.null(d$levene)) {
+    out <- c(out, sprintf("Variance   -- %s: F(%d, %d) = %.4f, p = %s",
+                          d$levene$method, d$levene$df1, d$levene$df2,
+                          d$levene$statistic, format_p_value(d$levene$p.value)))
+  } else out <- c(out, "Variance   -- Levene's test: not computable (a group has fewer than 2 replicates).")
+  if (!is.null(d$variance_ratio)) {
+    out <- c(out, sprintf("Variance   -- largest/smallest group SD = %.2f (%s vs %s)%s",
+                          d$variance_ratio$ratio, d$variance_ratio$max_group, d$variance_ratio$min_group,
+                          if (d$variance_ratio$ratio > 3) "  <- heterogeneous; Welch's t-test already allows for this" else ""))
+  }
+  paste(c(out, d$advisory), collapse = "\n")
 }
 
 compute_skewness <- function(x) {
@@ -668,7 +935,7 @@ suggest_statistical_workflow <- function(rep_df, comparison_tbl = NULL, comparis
     "Raw single-cell values should be visualized, but p-values should be based on biological replicate summaries to avoid pseudoreplication.",
     paste0("Recommended p-value correction: ", ifelse(suggested_correction == "none", "none, because only one comparison is planned", suggested_correction), "."),
     paste0("Optional global model suggestion: ", switch(suggested_global,
-      anova = "two-way ANOVA, because Condition and Time_min appear available with multiple levels",
+      anova = "repeated-measures ANOVA with the dish as the error stratum, because Condition and Time_min appear available with multiple levels",
       lmm = "linear mixed model, because replicate IDs appear across time and a time-course structure may be present",
       skip = "skip global model unless you have a specific factorial question"), ".")
   )
@@ -684,36 +951,109 @@ suggest_statistical_workflow <- function(rep_df, comparison_tbl = NULL, comparis
 }
 
 # =============================================================================
+# DATA TRANSFORMS (one pipeline, always reported)
+# =============================================================================
+# Every analysis in the app -- the pairwise tests, the global models, the figure
+# axes -- must agree about what scale the numbers are on, and the report must
+# say so. In particular the log transform applies a DATA-DEPENDENT shift when a
+# column contains non-positive values, so the shift constant is part of the
+# answer and is carried around with the values (audit CM-13, CM-14).
+
+apply_measure_transform <- function(x, transform = "none") {
+  transform <- transform %||% "none"
+  if (transform == "log") {
+    shift <- 0
+    if (any(x <= 0, na.rm = TRUE)) shift <- -min(x, na.rm = TRUE) + 1
+    list(values = log(x + shift), transform = "log", shift = shift,
+         label = if (shift != 0)
+                   paste0("log(x + ", formatC(shift, format = "g", digits = 6, width = 1),
+                          ")  [shift chosen so the smallest value maps to 1]")
+                 else "log(x)")
+  } else if (transform == "sqrt") {
+    list(values = sqrt(pmax(x, 0)), transform = "sqrt", shift = 0,
+         label = "sqrt(max(x, 0))")
+  } else {
+    list(values = x, transform = "none", shift = 0, label = "none (raw values)")
+  }
+}
+
+#' Apply one transform to several measurement columns, keeping a per-column
+#' record of exactly what was done (attached as the "transform_info" attribute).
+apply_transform_to_columns <- function(df, cols, transform = "none") {
+  transform <- transform %||% "none"
+  info <- list()
+  for (m in cols) {
+    if (!m %in% names(df) || !is.numeric(df[[m]])) next
+    tr <- tryCatch(apply_measure_transform(df[[m]], transform), error = function(e) NULL)
+    if (is.null(tr)) next
+    df[[m]] <- tr$values
+    info[[m]] <- tr[c("transform", "shift", "label")]
+  }
+  attr(df, "transform_info") <- info
+  attr(df, "transform") <- transform
+  df
+}
+
+#' One-line description of the transform applied to a single measurement, for
+#' reports, captions and axis labels.
+describe_transform <- function(df_or_info, measure, transform = NULL) {
+  info <- if (is.list(df_or_info) && !is.null(attr(df_or_info, "transform_info")))
+            attr(df_or_info, "transform_info") else df_or_info
+  entry <- if (is.list(info) && !is.null(info[[measure]])) info[[measure]] else NULL
+  if (!is.null(entry)) return(entry$label)
+  apply_measure_transform(numeric(0), transform %||% "none")$label
+}
+
+# =============================================================================
 # ROBUST LMM FITTING
 # =============================================================================
 
+# The LMM is fitted on cells, with the experimental design carried by the random
+# effects. A random INTERCEPT per dish, (1|Rep_unique), only absorbs variation
+# that is constant over the whole time course. Condition varies between dishes,
+# so its test is protected by that term -- but Time and Condition:Time vary
+# WITHIN a dish, and up to v3.1.2 they were therefore tested against the
+# cell-to-cell residual: 99-100% false positives once dishes drift over time
+# (audit CM-2). Adding (1|Rep_unique:Time_fac) gives each dish its own offset at
+# each timepoint -- focus drift, medium evaporation, per-session segmentation
+# quality -- which is the error term those two effects belong to.
+
+LMM_LABEL <- "Linear mixed model on cells (dish and dish x timepoint as random effects)"
+
 fit_lmm_safe <- function(df, measure, transform = "none") {
-  transform_used <- transform
-  if (transform == "log") {
-    vals <- df[[measure]]
-    df[[measure]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals - min(vals, na.rm = TRUE) + 1) else log(vals)
-  } else if (transform == "sqrt") {
-    df[[measure]] <- sqrt(pmax(df[[measure]], 0))
-  }
+  tr <- apply_measure_transform(df[[measure]], transform)
+  df[[measure]] <- tr$values
   df <- df[!is.na(df[[measure]]), ]
-  df$Condition <- factor(df$Condition)
-  df$Time_fac  <- factor(df$Time_min)
+  df$Condition <- droplevels(factor(df$Condition))
+  df$Time_fac  <- droplevels(factor(df$Time_min))
   df$Replicate <- factor(df$Replicate)
-  df$Rep_unique <- interaction(df$Condition, df$Replicate, drop = TRUE)
-  n_rep_levels <- nlevels(droplevels(df$Rep_unique))
+  df$Rep_unique <- droplevels(interaction(df$Condition, df$Replicate, drop = TRUE))
+
+  no_model <- function(msg) list(
+    model = NULL, method = "No global model", warnings = msg,
+    fallback_used = FALSE, fitted = FALSE, singular = FALSE,
+    transform_used = tr$transform, transform_label = tr$label, transform_shift = tr$shift)
+
+  n_rep_levels <- nlevels(df$Rep_unique)
   if (n_rep_levels < 3) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = paste0("Only ", n_rep_levels,
-                  " unique replicate groups (need >= 3). Falling back to ANOVA."),
-                fallback_used = TRUE, transform_used = transform_used))
+    return(no_model(paste0("Only ", n_rep_levels,
+      " unique replicate groups (need at least 3). No global model was fitted -- ",
+      "the Pairwise results above are still valid.")))
   }
-  cell_counts <- table(df$Condition, df$Time_fac)
-  if (any(cell_counts == 0)) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = "Some groups have zero observations. Falling back to ANOVA.",
-                fallback_used = TRUE, transform_used = transform_used))
+  if (any(table(df$Condition, df$Time_fac) == 0)) {
+    return(no_model(paste0("At least one Condition x Timepoint combination has no cells. ",
+      "No global model was fitted -- the Pairwise results above are still valid.")))
   }
-  formula_lmm <- as.formula(paste0(measure, " ~ Condition * Time_fac + (1|Rep_unique)"))
+
+  # The dish x timepoint term is only estimable when dishes are measured at more
+  # than one timepoint with more than one cell per dish per timepoint; otherwise
+  # it is confounded with the residual.
+  n_times <- nlevels(df$Time_fac)
+  cells_per_cell <- table(df$Rep_unique, df$Time_fac)
+  can_fit_reptime <- n_times > 1 && min(cells_per_cell[cells_per_cell > 0]) >= 2
+  rand <- if (can_fit_reptime) "(1|Rep_unique) + (1|Rep_unique:Time_fac)" else "(1|Rep_unique)"
+  formula_lmm <- as.formula(paste0(measure, " ~ Condition * Time_fac + ", rand))
+
   warn_msgs <- character()
   model <- tryCatch(
     withCallingHandlers({
@@ -725,19 +1065,49 @@ fit_lmm_safe <- function(df, measure, transform = "none") {
                                                    optCtrl = list(maxfun = 50000)))
     }, warning = function(w) { warn_msgs <<- c(warn_msgs, conditionMessage(w)); invokeRestart("muffleWarning") }),
     error = function(e) NULL)
-  is_singular <- if (!is.null(model)) tryCatch(isTRUE(lme4::isSingular(model)), error = function(e) FALSE) else FALSE
+
   if (is.null(model)) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = paste0("LMM failed. ", paste(warn_msgs, collapse = "; "), " Falling back to ANOVA."),
-                fallback_used = TRUE, transform_used = transform_used))
+    return(no_model(paste0("The mixed model did not converge",
+      if (length(warn_msgs)) paste0(" (", paste(unique(warn_msgs), collapse = "; "), ")") else "",
+      ". No global model was fitted -- the Pairwise results above are still valid.")))
   }
+
+  notes <- character(0)
+  if (!can_fit_reptime) notes <- c(notes, paste0(
+    "Only one timepoint, or only one cell per dish per timepoint: the dish x timepoint ",
+    "random term is not estimable and was dropped. Time and Condition:Time are NOT ",
+    "protected against pseudoreplication in this fit -- prefer the repeated-measures ANOVA."))
+
+  # A singular fit means a variance component was estimated at exactly zero. That
+  # is reported, not silently swapped for another model: the fit is still usable
+  # (its tests become conservative) and the user needs to know which term
+  # collapsed. Up to v3.1.2 this branch returned NULL while promising a fallback
+  # ANOVA that was never computed (audit CM-7).
+  is_singular <- tryCatch(isTRUE(lme4::isSingular(model)), error = function(e) FALSE)
   if (is_singular) {
-    return(list(model = NULL, method = "Fallback: Two-way ANOVA",
-                warnings = "Singular fit (replicate variance ~ 0). Falling back to ANOVA.",
-                fallback_used = TRUE, transform_used = transform_used))
+    vc <- tryCatch(as.data.frame(lme4::VarCorr(model)), error = function(e) NULL)
+    zero_terms <- if (!is.null(vc)) vc$grp[!is.na(vc$vcov) & vc$vcov < 1e-10] else character(0)
+    notes <- c(notes, paste0(
+      "Singular fit: ",
+      if (length(zero_terms)) paste0("the random term(s) ", paste(zero_terms, collapse = ", "),
+                                     " were estimated at zero variance. ")
+      else "at least one random-effect variance was estimated at zero. ",
+      "The model below is still reported, and its tests are conservative rather than wrong, ",
+      "but with this few replicates the variance components are barely identified. ",
+      "Treat the repeated-measures ANOVA on replicate summaries as the primary global model."))
   }
-  list(model = model, method = "Linear Mixed Model (cell-level, replicate as random effect)",
-       warnings = warn_msgs, fallback_used = FALSE, transform_used = transform_used, data_used = df)
+  if (!has_lmerTest) notes <- c(notes,
+    "lmerTest is not installed, so the mixed-model table has no p-value column. Install lmerTest for Satterthwaite degrees of freedom.")
+
+  list(model = model, method = LMM_LABEL,
+       formula = formula_lmm,
+       random_structure = rand,
+       has_reptime_term = can_fit_reptime,
+       warnings = c(warn_msgs, notes), notes = notes,
+       fallback_used = FALSE, fitted = TRUE, singular = is_singular,
+       df_method = if (has_lmerTest) "Satterthwaite (lmerTest)" else "none (lmerTest not installed)",
+       transform_used = tr$transform, transform_label = tr$label, transform_shift = tr$shift,
+       data_used = df)
 }
 
 # =============================================================================
@@ -782,39 +1152,200 @@ find_optimal_k <- function(data_matrix, max_k = 10) {
 # MULTI-FEATURE ANALYSIS HELPERS
 # =============================================================================
 
-run_anova_for_feature <- function(df, measure, yvar = "median_val") {
-  rs <- compute_replicate_summaries(df, measure)
-  rs$Time_fac <- factor(rs$Time_min)
-  formula_str <- paste0(yvar, " ~ Condition * Time_fac")
-  model <- tryCatch(aov(as.formula(formula_str), data = rs), error = function(e) NULL)
-  if (is.null(model)) return(NULL)
-  s <- summary(model)[[1]]; p_vals <- s[["Pr(>F)"]]; ss_vals <- s[["Sum Sq"]]
-  ss_resid <- ss_vals[length(ss_vals)]
-  eta2 <- ss_vals[-length(ss_vals)] / (ss_vals[-length(ss_vals)] + ss_resid)
-  data.frame(Feature = measure, Condition_p = p_vals[1], Time_p = p_vals[2],
-    Interaction_p = if (length(p_vals) >= 3) p_vals[3] else NA,
-    Condition_eta2 = round(eta2[1], 4), Time_eta2 = round(eta2[2], 4),
-    Interaction_eta2 = if (length(eta2) >= 3) round(eta2[3], 4) else NA, stringsAsFactors = FALSE)
+# -----------------------------------------------------------------------------
+# Repeated-measures ANOVA on replicate-level summaries.
+#
+# In a time course the SAME dish is imaged at every timepoint, so a dish is one
+# experimental unit, not k of them. Up to v3.1.2 this function fitted a plain
+# `aov(y ~ Condition * Time_fac)` on the replicate summaries, which counted each
+# dish once per timepoint and gave a measured 41% false-positive rate for the
+# Condition effect on null data (audit CM-1).
+#
+# The model below puts the dish in its own error stratum, so each term is tested
+# against the variation it actually varies over:
+#   * Condition varies BETWEEN dishes -> tested on dish-to-dish variation
+#     (Error: Rep_unique), df = n_dishes - n_conditions
+#   * Time and Condition:Time vary WITHIN a dish -> tested on the dish x time
+#     variation (Error: Within), never on the cell-to-cell residual
+#
+# Note there is exactly one summary value per (dish, timepoint), so the within
+# stratum residual IS the dish x time interaction. Nesting time explicitly --
+# Error(Rep_unique/Time_fac) -- would leave that stratum with zero residual df
+# and no p-values at all, which is why Error(Rep_unique) is used.
+# -----------------------------------------------------------------------------
+
+RM_ANOVA_LABEL <- "Repeated-measures ANOVA on replicate summaries (dish as error stratum)"
+
+fit_rm_anova <- function(rs, yvar = "median_val") {
+  if (is.null(rs) || nrow(rs) == 0 || !yvar %in% names(rs)) {
+    return(list(ok = FALSE, msg = "No replicate-level summaries available."))
+  }
+  if (!all(c("Condition", "Replicate") %in% names(rs))) {
+    return(list(ok = FALSE, msg = "The global model needs Condition and Replicate columns."))
+  }
+  rs <- rs[!is.na(rs[[yvar]]), , drop = FALSE]
+  rs$Condition  <- droplevels(factor(rs$Condition))
+  rs$Replicate  <- factor(rs$Replicate)
+  rs$Rep_unique <- droplevels(interaction(rs$Condition, rs$Replicate, drop = TRUE))
+  has_time <- "Time_min" %in% names(rs)
+  rs$Time_fac <- if (has_time) droplevels(factor(rs$Time_min)) else factor(rep("all", nrow(rs)))
+
+  n_cond <- nlevels(rs$Condition)
+  n_time <- nlevels(rs$Time_fac)
+  n_dish <- nlevels(rs$Rep_unique)
+  if (n_cond < 2) return(list(ok = FALSE, msg = "Need at least two conditions for a global model."))
+  if (n_dish <= n_cond) {
+    return(list(ok = FALSE, msg = paste0(
+      "Only ", n_dish, " biological replicates across ", n_cond,
+      " conditions: there is no dish-to-dish variation left to test Condition against. ",
+      "A global model needs at least two replicates in at least one condition.")))
+  }
+
+  repeated <- n_time > 1
+  form <- if (repeated) {
+    as.formula(paste0(yvar, " ~ Condition * Time_fac + Error(Rep_unique)"))
+  } else {
+    # One timepoint: the design collapses to a one-way ANOVA over dishes, which
+    # already has the dish as its unit. No error stratum is needed or estimable.
+    as.formula(paste0(yvar, " ~ Condition"))
+  }
+  model <- tryCatch(aov(form, data = rs), error = function(e) NULL)
+  if (is.null(model)) return(list(ok = FALSE, msg = "The global model could not be fitted."))
+
+  tbl <- tidy_rm_anova(model)
+  if (is.null(tbl) || nrow(tbl) == 0) {
+    return(list(ok = FALSE, msg = "The global model produced no testable terms."))
+  }
+  notes <- character(0)
+  if (!repeated) notes <- c(notes,
+    "Only one timepoint: fitted as a one-way ANOVA on replicate summaries (no Time term).")
+  if (any(is.na(tbl$p))) notes <- c(notes,
+    "Some terms have no residual degrees of freedom left and cannot be tested; add replicates or timepoints.")
+
+  list(ok = TRUE, model = model, table = tbl, data = rs,
+       method = if (repeated) RM_ANOVA_LABEL else
+         "One-way ANOVA on replicate summaries (one timepoint; dish is the unit)",
+       repeated = repeated, n_dishes = n_dish, n_conditions = n_cond, n_times = n_time,
+       notes = notes, yvar = yvar)
 }
 
-detect_earliest_divergence <- function(df, measure, ref_cond, alpha = 0.05) {
+#' Flatten an aov / aovlist summary into one tidy table, recording which error
+#' stratum -- and therefore which denominator df -- tested each term.
+tidy_rm_anova <- function(model) {
+  s <- summary(model)
+  strata <- if (inherits(model, "aovlist")) s else list("Error: Within" = s)
+  out <- lapply(names(strata), function(nm) {
+    tab <- strata[[nm]]
+    if (is.list(tab) && !is.data.frame(tab)) tab <- tab[[1]]
+    if (is.null(tab)) return(NULL)
+    terms <- trimws(rownames(tab))
+    ss <- tab[["Sum Sq"]]
+    resid_i <- which(terms == "Residuals")
+    ss_resid <- if (length(resid_i) == 1) ss[resid_i] else NA_real_
+    df_resid <- if (length(resid_i) == 1) tab[["Df"]][resid_i] else NA_real_
+    keep <- setdiff(seq_along(terms), resid_i)
+    if (length(keep) == 0) return(NULL)
+    data.frame(
+      Term = terms[keep],
+      Error_Stratum = sub("^Error: ", "", nm),
+      Df = tab[["Df"]][keep],
+      DenDF = df_resid,
+      Sum_Sq = ss[keep],
+      Mean_Sq = tab[["Mean Sq"]][keep],
+      F_value = tab[["F value"]][keep],
+      p = tab[["Pr(>F)"]][keep],
+      partial_eta2 = if (is.na(ss_resid)) NA_real_ else ss[keep] / (ss[keep] + ss_resid),
+      stringsAsFactors = FALSE
+    )
+  })
+  out <- do.call(rbind, out[!vapply(out, is.null, logical(1))])
+  if (is.null(out)) return(NULL)
+  rownames(out) <- NULL
+  out
+}
+
+#' Human-readable print of a fit_rm_anova() result, used by the Statistics tab
+#' and the downloaded report.
+format_rm_anova <- function(fit, digits = 4) {
+  if (is.null(fit) || !isTRUE(fit$ok)) {
+    return(paste("No global model:", fit$msg %||% "not available."))
+  }
+  tb <- fit$table
+  df <- data.frame(
+    Term = tb$Term,
+    `Tested against` = tb$Error_Stratum,
+    Df = tb$Df, DenDF = tb$DenDF,
+    `Sum Sq` = signif(tb$Sum_Sq, digits), `Mean Sq` = signif(tb$Mean_Sq, digits),
+    `F` = signif(tb$F_value, digits),
+    `p` = format_p_value(tb$p),
+    `partial eta2` = round(tb$partial_eta2, 3),
+    check.names = FALSE, stringsAsFactors = FALSE
+  )
+  lines <- c(
+    fit$method,
+    paste0("Unit of replication: biological replicate (", fit$n_dishes,
+           " replicate groups across ", fit$n_conditions, " conditions",
+           if (fit$repeated) paste0(", ", fit$n_times, " timepoints") else "", ")"),
+    paste(capture.output(print(df, row.names = FALSE)), collapse = "\n")
+  )
+  if (length(fit$notes) > 0) lines <- c(lines, paste("Note:", fit$notes))
+  paste(lines, collapse = "\n")
+}
+
+run_anova_for_feature <- function(df, measure, yvar = "median_val") {
+  rs <- compute_replicate_summaries(df, measure)
+  fit <- fit_rm_anova(rs, yvar = yvar)
+  if (!isTRUE(fit$ok)) return(NULL)
+  tb <- fit$table
+  pick <- function(term, col) {
+    i <- match(term, tb$Term)
+    if (is.na(i)) NA_real_ else tb[[col]][i]
+  }
+  data.frame(
+    Feature = measure,
+    Condition_p = pick("Condition", "p"),
+    Time_p = pick("Time_fac", "p"),
+    Interaction_p = pick("Condition:Time_fac", "p"),
+    Condition_partial_eta2 = round(pick("Condition", "partial_eta2"), 4),
+    Time_partial_eta2 = round(pick("Time_fac", "partial_eta2"), 4),
+    Interaction_partial_eta2 = round(pick("Condition:Time_fac", "partial_eta2"), 4),
+    stringsAsFactors = FALSE
+  )
+}
+
+# The multiplicity family here is every treatment x timepoint comparison for this
+# feature, adjusted together. Up to v3.1.2 Holm was applied across timepoints
+# WITHIN each treatment, which was a third, different family definition in the
+# same app -- and the "earliest significant timepoint" it reported was sensitive
+# to that choice (audit CM-21).
+detect_earliest_divergence <- function(df, measure, ref_cond, alpha = 0.05,
+                                       correction = "holm") {
   rs <- compute_replicate_summaries(df, measure)
   times <- sort(unique(rs$Time_min))
   trt_conds <- setdiff(unique(as.character(rs$Condition)), ref_cond)
-  results <- list()
-  for (trt in trt_conds) {
-    p_vals <- sapply(times, function(tm) {
-      ctrl <- rs$median_val[rs$Condition == ref_cond & rs$Time_min == tm]
-      treat <- rs$median_val[rs$Condition == trt & rs$Time_min == tm]
-      if (length(ctrl) < 2 || length(treat) < 2) return(NA)
-      tryCatch(t.test(treat, ctrl, var.equal = FALSE)$p.value, error = function(e) NA) })
-    p_adj <- p.adjust(p_vals, method = "holm")
-    first_sig <- which(p_adj < alpha)
-    earliest <- if (length(first_sig) > 0) times[first_sig[1]] else NA
-    earliest_p <- if (length(first_sig) > 0) p_adj[first_sig[1]] else NA
-    results[[length(results) + 1]] <- data.frame(Feature = measure, Treatment = trt,
-      Earliest_Significant_Time = earliest, p_adj_at_earliest = round(earliest_p, 4), stringsAsFactors = FALSE)
-  }
+  if (length(trt_conds) == 0 || length(times) == 0) return(NULL)
+  grid <- expand.grid(Time_min = times, Treatment = trt_conds,
+                      KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+  grid$p_raw <- vapply(seq_len(nrow(grid)), function(i) {
+    ctrl  <- rs$median_val[rs$Condition == ref_cond        & rs$Time_min == grid$Time_min[i]]
+    treat <- rs$median_val[rs$Condition == grid$Treatment[i] & rs$Time_min == grid$Time_min[i]]
+    if (length(ctrl) < 2 || length(treat) < 2) return(NA_real_)
+    tryCatch(t.test(treat, ctrl, var.equal = FALSE)$p.value, error = function(e) NA_real_)
+  }, numeric(1))
+  corr <- if (is.null(correction) || correction == "none") "none" else correction
+  grid$p_adj <- if (corr == "none") grid$p_raw else p.adjust(grid$p_raw, method = corr)
+  family_size <- sum(!is.na(grid$p_raw))
+  results <- lapply(trt_conds, function(trt) {
+    sub <- grid[grid$Treatment == trt, , drop = FALSE]
+    sub <- sub[order(sub$Time_min), , drop = FALSE]
+    first_sig <- which(!is.na(sub$p_adj) & sub$p_adj < alpha)
+    data.frame(Feature = measure, Treatment = trt,
+      Earliest_Significant_Time = if (length(first_sig) > 0) sub$Time_min[first_sig[1]] else NA,
+      p_adj_at_earliest = if (length(first_sig) > 0) round(sub$p_adj[first_sig[1]], 4) else NA,
+      Multiplicity_Family = paste0(corr, " across all ", family_size,
+                                   " treatment x timepoint comparisons for this feature"),
+      stringsAsFactors = FALSE)
+  })
   do.call(rbind, results)
 }
 
@@ -936,6 +1467,10 @@ plot_radar <- function(radar_df, cols, base_sz = 12, show_points = TRUE,
           plot.title = element_text(face = "bold", hjust = 0.5))
   p
 }
+
+# ---- END OF STATISTICAL CORE (tests/helper-cellmorphr.R sources up to here) ----
+# Everything above this marker is plain R with no Shiny reactivity, so the test
+# suite can source it standalone. Keep new statistical helpers above the marker.
 
 # =============================================================================
 # SHARED FIGURE CONTROLS (reusable UI component)
@@ -1417,6 +1952,10 @@ ui <- page_navbar(
           tags$p(class = "small", style = "color:#8888a8;", "Plus numeric measurement columns."),
           tags$hr(),
           uiOutput("measure_selector"),
+          textInput("measure_unit", "Measurement unit (optional)", "",
+                    placeholder = "e.g. \u00b5m\u00b2, \u00b5m, a.u."),
+          tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-8px;",
+            "Remembered per measurement and added to every axis title, e.g. \"Area (\u00b5m\u00b2)\"."),
           uiOutput("condition_order_ui"),
           tags$hr(),
           tags$details(
@@ -1595,7 +2134,10 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("dist", 8, 5.5),
         tags$hr(),
-        downloadButton("dl_dist", "Download Figure", class = "btn-primary w-100")
+        downloadButton("dl_dist", "Download Figure", class = "btn-primary w-100"),
+        downloadButton("dl_dist_data", "Download Plot Data (CSV)", class = "btn-outline-secondary w-100 mt-2"),
+        tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
+          "The per-replicate medians and means behind the figure, for replotting elsewhere.")
       ),
       navset_card_tab(
         nav_panel("Plot",
@@ -1642,7 +2184,13 @@ ui <- page_navbar(
         radioButtons("traj_summary", "Summary Statistic",
                      choices = c("Median" = "median_val", "Mean" = "mean_val"), selected = "median_val"),
         checkboxInput("traj_smooth", "Add trend line (loess)", TRUE),
-        checkboxInput("traj_error", "Show SEM ribbon", TRUE),
+        checkboxInput("traj_error", "Show error band / bars", TRUE),
+        conditionalPanel("input.traj_error",
+          radioButtons("traj_error_type", "Error band / bars show",
+            choices = c("SEM" = "sem", "SD" = "sd", "95% CI" = "ci95"),
+            selected = "sem", inline = TRUE),
+          tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+            "Computed across biological replicates, never across cells. The subtitle states which one is drawn.")),
         checkboxInput("traj_connect_reps", "Connect individual replicates", TRUE),
         radioButtons("traj_style", "Style",
                      choices = c("Points + Lines" = "pointline", "Points + Ribbon" = "ribbon"),
@@ -1652,7 +2200,10 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("traj", 7, 5),
         tags$hr(),
-        downloadButton("dl_traj", "Download Figure", class = "btn-primary w-100")
+        downloadButton("dl_traj", "Download Figure", class = "btn-primary w-100"),
+        downloadButton("dl_traj_data", "Download Plot Data (CSV)", class = "btn-outline-secondary w-100 mt-2"),
+        tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
+          "Replicate summaries plus the group mean, SD, SEM and 95% CI drawn here, for replotting elsewhere.")
       ),
       navset_card_tab(
         nav_panel("Plot",
@@ -1662,7 +2213,11 @@ ui <- page_navbar(
           tags$h6("Understanding Trajectory Plots"),
           tags$p(tags$strong("Each point"), " is the median (or mean) of one biological replicate."),
           tags$p(tags$strong("Diverging lines"), " between conditions = Condition x Time interaction."),
-          tags$p(tags$strong("SEM ribbons"), " computed from replicate-level summaries (N=3).")
+          tags$p(tags$strong("Error band / bars"), " are computed from the replicate-level summaries, never from cells: ",
+                 tags$strong("SD"), " is the dish-to-dish spread of the replicate values; ",
+                 tags$strong("SEM"), " is that SD divided by the square root of the number of replicates in the group; ",
+                 tags$strong("95% CI"), " is the t-based interval on the replicate values (undefined with one replicate). ",
+                 "The subtitle always names the one being drawn and the number of replicates per group.")
         ))
       )
     )
@@ -1829,7 +2384,7 @@ ui <- page_navbar(
           choices = c("Each group vs selected reference" = "vs_reference",
                       "All pairwise groups" = "all_pairwise",
                       "Pairwise within each time point" = "within_time",
-                      "Pairwise within each condition" = "within_condition"), selected = "vs_reference"),
+                      "Pairwise within each condition" = "within_condition"), selected = "within_time"),
         uiOutput("stat_reference_ui"),
         selectInput("stat_test", "Pairwise test",
           choices = c("Welch's t-test" = "welch", "Wilcoxon rank-sum" = "wilcox"), selected = "welch"),
@@ -1842,13 +2397,14 @@ ui <- page_navbar(
         tags$details(
           tags$summary(tags$strong("Optional global model"), style = "cursor:pointer;"),
           radioButtons("stat_method", "Global model",
-            choices = c("Two-way ANOVA if Condition + Time_min are available" = "anova",
-                        "Linear Mixed Model" = "lmm",
+            choices = c("Repeated-measures ANOVA (dish as error stratum)" = "anova",
+                        "Linear mixed model on cells" = "lmm",
                         "Skip global model" = "skip"), selected = "anova"),
-          conditionalPanel("input.stat_method == 'lmm'",
-            selectInput("stat_transform", "Data Transform (LMM)",
-              choices = c("None" = "none", "Log" = "log", "Sqrt" = "sqrt"), selected = "none"),
-            tags$p(class = "small text-muted", "LMM is attempted only when replicate structure supports it."))
+          tags$p(class = "small text-muted",
+            "Both models treat one dish measured at k timepoints as one experimental unit. ",
+            "The repeated-measures ANOVA runs on the replicate summaries; the mixed model runs on cells, ",
+            "with a random effect per dish and per dish-and-timepoint. Both use the Data tab's transform, ",
+            "the same one the pairwise tests use.")
         ),
         tags$hr(),
         actionButton("run_stats", "Run Flexible Statistics", class = "btn-primary w-100", icon = icon("play")),
@@ -1928,7 +2484,7 @@ ui <- page_navbar(
           choices = c("Median" = "median_val", "Mean" = "mean_val"), selected = "median_val"),
         radioButtons("es_type", "Metric",
           choices = c("Absolute difference" = "abs_diff", "Percent change" = "pct_change",
-                      "Cohen's d" = "cohens_d"), selected = "pct_change"),
+                      "Hedges' g (95% CI)" = "hedges_g"), selected = "pct_change"),
         tags$hr(),
         checkboxInput("es_show_control", "Show control trajectory (baseline)", FALSE),
         radioButtons("es_plot_style", "Plot style",
@@ -1949,7 +2505,7 @@ ui <- page_navbar(
           tags$h6("Understanding Effect Sizes"),
           tags$p("P-values show if an effect exists; effect sizes show ", tags$strong("how big"), "."),
           tags$p(tags$strong("Percent change"), " is most intuitive: 'Cells are 25% larger at 120 min.'"),
-          tags$p(tags$strong("Cohen's d"), " standardizes by variability. d > 0.8 = large effect.")
+          tags$p(tags$strong("Hedges' g"), " standardizes by variability: the difference in means divided by the pooled SD of the biological replicates, with Hedges' small-sample correction. Cohen's conventional benchmarks put |g| > 0.8 at \"large\", but with three dishes per group the 95% interval shown alongside each point is usually several units wide -- read the interval, not the point.")
         ))
       )
     )
@@ -1976,7 +2532,7 @@ ui <- page_navbar(
         uiOutput("mf_feature_selector"),
         tags$hr(),
         actionButton("run_multifeature", "Run All Features", class = "btn-primary w-100", icon = icon("play")),
-        tags$p(class = "small text-muted mt-2", "Two-way ANOVA across all features simultaneously."),
+        tags$p(class = "small text-muted mt-2", "Repeated-measures ANOVA (dish as error stratum) across all features simultaneously."),
         tags$hr(),
         tags$p(tags$strong("Raw Heatmap Settings"), class = "mb-1"),
         radioButtons("mf_raw_stat", "Statistic",
@@ -2798,7 +3354,8 @@ server <- function(input, output, session) {
         settings = list(
           measure = input$measure,
           ref_condition = input$ref_condition,
-          data_transform = input$data_transform
+          data_transform = input$data_transform,
+          measure_units = reactiveValuesToList(measure_units)
         ),
         app_version = APP_VERSION,
         saved_at = Sys.time()
@@ -2818,6 +3375,13 @@ server <- function(input, output, session) {
     if (!is.null(s$measure)) updateSelectInput(session, "measure", selected = s$measure)
     if (!is.null(s$ref_condition)) updateSelectInput(session, "ref_condition", selected = s$ref_condition)
     if (!is.null(s$data_transform)) updateSelectInput(session, "data_transform", selected = s$data_transform)
+    if (is.list(s$measure_units)) {
+      for (k in names(s$measure_units)) measure_units[[k]] <- s$measure_units[[k]]
+      # The text box only follows input$measure when that CHANGES; refresh it
+      # here too so a restored session shows its unit even for the same measure.
+      m_now <- s$measure %||% input$measure
+      if (!is.null(m_now)) updateTextInput(session, "measure_unit", value = s$measure_units[[m_now]] %||% "")
+    }
     pending_session_settings(NULL)
   }, ignoreInit = TRUE)
 
@@ -2888,7 +3452,7 @@ server <- function(input, output, session) {
   comparison_preview <- reactive({
     req(flexible_rep_summ())
     ref <- input$stat_reference_group
-    build_comparison_table(flexible_rep_summ(), input$stat_compare_mode %||% "vs_reference", ref)
+    build_comparison_table(flexible_rep_summ(), input$stat_compare_mode %||% "within_time", ref)
   })
 
   output$stat_reference_ui <- renderUI({
@@ -2896,7 +3460,7 @@ server <- function(input, output, session) {
     groups <- sort(unique(as.character(flexible_rep_summ()$Statistics_Group)))
     idx <- grep("uninf|control|wt|mock|empty|vector|0nm|0 nM|0_nM", groups, ignore.case = TRUE)
     default <- if (length(idx) > 0) groups[idx[1]] else groups[1]
-    if ((input$stat_compare_mode %||% "vs_reference") == "all_pairwise") {
+    if ((input$stat_compare_mode %||% "within_time") == "all_pairwise") {
       tags$p(class = "small text-muted", "Reference group is not used for all-pairwise mode.")
     } else {
       selectInput("stat_reference_group", "Reference group", choices = groups, selected = default)
@@ -2929,7 +3493,7 @@ server <- function(input, output, session) {
     suggestion <- suggest_statistical_workflow(
       rep_df = flexible_rep_summ(),
       comparison_tbl = comparison_preview(),
-      comparison_mode = input$stat_compare_mode %||% "vs_reference",
+      comparison_mode = input$stat_compare_mode %||% "within_time",
       stat_unit = input$stat_summary %||% "median_val",
       selected_group_cols = input$stat_group_cols
     )
@@ -2947,7 +3511,7 @@ server <- function(input, output, session) {
     suggest_statistical_workflow(
       rep_df = flexible_rep_summ(),
       comparison_tbl = comparison_preview(),
-      comparison_mode = input$stat_compare_mode %||% "vs_reference",
+      comparison_mode = input$stat_compare_mode %||% "within_time",
       stat_unit = input$stat_summary %||% "median_val",
       selected_group_cols = input$stat_group_cols
     )
@@ -3064,24 +3628,45 @@ server <- function(input, output, session) {
     mc <- tryCatch(measure_cols(), error = function(e) NULL)
     if (is.null(mc) || length(mc) == 0) return(df)
     transform <- input$data_transform %||% "none"
-    if (transform == "none") return(df)
-    for (m in mc) {
-      if (!m %in% names(df)) next
-      tryCatch({
-        if (transform == "log") {
-          vals <- df[[m]]
-          df[[m]] <- if (any(vals <= 0, na.rm = TRUE)) log(vals - min(vals, na.rm = TRUE) + 1) else log(vals)
-        } else if (transform == "sqrt") {
-          df[[m]] <- sqrt(pmax(df[[m]], 0))
-        }
-      }, error = function(e) NULL)
-    }
-    df
+    # One pipeline for every analysis in the app, and it records the transform
+    # (including the log shift) so the reports can state it -- see CM-13/CM-14.
+    apply_transform_to_columns(df, mc, transform)
   })
 
-  measure_label <- reactive({
+  # Units are remembered PER measurement (Area -> um^2, Circularity -> nothing),
+  # so switching the measurement never carries the wrong unit onto an axis.
+  measure_units <- reactiveValues()
+  observeEvent(input$measure, {
+    req(input$measure)
+    updateTextInput(session, "measure_unit",
+                    value = isolate(measure_units[[input$measure]]) %||% "")
+  })
+  observeEvent(input$measure_unit, {
+    req(input$measure)
+    measure_units[[input$measure]] <- trimws(input$measure_unit %||% "")
+  })
+  measure_unit_now <- reactive({
+    m <- input$measure
+    if (is.null(m)) return("")
+    u <- measure_units[[m]]
+    if (is.null(u)) "" else trimws(u)
+  })
+
+  # Name of the measurement as it reads in a TITLE: transform shown, no unit.
+  measure_title <- reactive({
     m <- input$measure; tr <- input$data_transform %||% "none"
     if (tr == "log") paste0("log(", m, ")") else if (tr == "sqrt") paste0("sqrt(", m, ")") else m
+  })
+  # Name of the measurement as it reads on an AXIS: with its unit when one is
+  # set. A transformed axis is no longer in the raw unit, so the unit moves
+  # inside the transform -- "log(Area [um^2])", never "log(Area) (um^2)".
+  measure_label <- reactive({
+    m <- input$measure; tr <- input$data_transform %||% "none"
+    u <- measure_unit_now()
+    if (!nzchar(u)) return(measure_title())
+    if (tr == "log") paste0("log(", m, " [", u, "])")
+    else if (tr == "sqrt") paste0("sqrt(", m, " [", u, "])")
+    else paste0(m, " (", u, ")")
   })
 
   # Color pickers
@@ -3090,30 +3675,10 @@ server <- function(input, output, session) {
     conds <- levels(plot_data()$Condition)
     n <- length(conds)
 
-    # Named palette presets
-    PALETTE_PRESETS <- list(
-      "Custom"       = NULL,
-      "Blue/Red"     = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C","#1ABC9C","#F39C12"),
-      "Teal/Orange"  = c("#2a9d8f","#e76f51","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Pastel"       = c("#aec6cf","#ffb7b2","#b5ead7","#ffdac1","#c7ceea","#ff9aa2","#e2f0cb","#f8c8d4"),
-      "Bold"         = c("#e63946","#2a9d8f","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Publication"  = c("#0077b6","#e63946","#2a9d8f","#f4a261","#6a0dad","#e9c46a","#264653","#f77f00"),
-      "Colorblind"   = c("#0077bb","#ee7733","#009988","#cc3311","#33bbee","#ee3377","#bbbbbb","#000000"),
-      "Viridis"      = c("#440154","#31688e","#35b779","#fde725","#21918c","#5ec962","#90d743","#c8e020"),
-      "Grayscale"    = paste0("grey", round(seq(20, 80, length.out = 8)))
-    )
+    dcols <- default_cond_colors(n)
 
-    defaults_by_n <- list(
-      "2" = c("#4A90D9","#D94A4A"),
-      "3" = c("#4A90D9","#D94A4A","#F5A623"),
-      "4" = c("#4A90D9","#D94A4A","#F5A623","#7ED321"),
-      "5" = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6"),
-      "6" = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C")
-    )
-    dcols <- if (n <= 6) defaults_by_n[[as.character(n)]] else scales::hue_pal()(n)
-
-    sel_preset <- input$palette_preset_sel %||% "Custom"
-    if (!is.null(sel_preset) && sel_preset != "Custom" && sel_preset %in% names(PALETTE_PRESETS)) {
+    sel_preset <- input$palette_preset_sel %||% names(PALETTE_PRESETS)[1]
+    if (sel_preset != "Custom" && sel_preset %in% names(PALETTE_PRESETS)) {
       preset_cols <- rep_len(PALETTE_PRESETS[[sel_preset]], n)
     } else {
       preset_cols <- dcols
@@ -3122,7 +3687,9 @@ server <- function(input, output, session) {
     tagList(
       tags$p(tags$strong("Color Palette"), class = "mb-1"),
       selectInput("palette_preset_sel", "Quick palette",
-        choices = names(PALETTE_PRESETS), selected = sel_preset),
+        choices = c(names(PALETTE_PRESETS), "Custom"), selected = sel_preset),
+      tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+        "Okabe-Ito and Tol are distinguishable under the common forms of colour blindness and in greyscale print."),
       if (has_colourpicker)
         tagList(lapply(seq_along(conds), function(i) {
           cur <- input[[paste0("color_", i)]]
@@ -3138,16 +3705,6 @@ server <- function(input, output, session) {
   observeEvent(input$palette_preset_sel, {
     req(plot_data())
     conds <- levels(plot_data()$Condition); n <- length(conds)
-    PALETTE_PRESETS <- list(
-      "Blue/Red"    = c("#4A90D9","#D94A4A","#F5A623","#7ED321","#9B59B6","#E74C3C","#1ABC9C","#F39C12"),
-      "Teal/Orange" = c("#2a9d8f","#e76f51","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Pastel"      = c("#aec6cf","#ffb7b2","#b5ead7","#ffdac1","#c7ceea","#ff9aa2","#e2f0cb","#f8c8d4"),
-      "Bold"        = c("#e63946","#2a9d8f","#e9c46a","#264653","#f4a261","#457b9d","#a8dadc","#1d3557"),
-      "Publication" = c("#0077b6","#e63946","#2a9d8f","#f4a261","#6a0dad","#e9c46a","#264653","#f77f00"),
-      "Colorblind"  = c("#0077bb","#ee7733","#009988","#cc3311","#33bbee","#ee3377","#bbbbbb","#000000"),
-      "Viridis"     = c("#440154","#31688e","#35b779","#fde725","#21918c","#5ec962","#90d743","#c8e020"),
-      "Grayscale"   = paste0("grey", round(seq(20, 80, length.out = 8)))
-    )
     if (!is.null(input$palette_preset_sel) && input$palette_preset_sel %in% names(PALETTE_PRESETS) && has_colourpicker) {
       cols <- rep_len(PALETTE_PRESETS[[input$palette_preset_sel]], n)
       for (i in seq_along(conds)) {
@@ -3159,7 +3716,7 @@ server <- function(input, output, session) {
   cond_colors <- reactive({
     req(plot_data())
     conds <- levels(plot_data()$Condition); n <- length(conds)
-    dcols <- if (n == 2) c("#4A90D9", "#D94A4A") else scales::hue_pal()(n)
+    dcols <- default_cond_colors(n)
     cols <- if (has_colourpicker)
       sapply(seq_along(conds), function(i) { v <- input[[paste0("color_", i)]]; if (!is.null(v) && nchar(v) > 0) v else dcols[i] })
     else dcols
@@ -3187,7 +3744,20 @@ server <- function(input, output, session) {
   output$data_table <- renderDT({ req(raw_data()); datatable(head(raw_data(), 500), options = list(pageLength = 15, scrollX = TRUE), caption = "First 500 rows") })
   output$n_cells_txt  <- renderText({ req(raw_data()); format(nrow(raw_data()), big.mark = ",") })
   output$n_groups_txt <- renderText({ req(raw_data()); nc <- length(unique(raw_data()$Condition)); nt <- length(unique(raw_data()$Time_min)); paste0(nc, " x ", nt, " = ", nc * nt) })
-  output$n_reps_txt   <- renderText({ req(raw_data()); paste(length(unique(raw_data()$Replicate)), "per group") })
+  output$n_reps_txt   <- renderText({
+    req(raw_data())
+    # The global count of distinct replicate labels overstates n whenever a
+    # replicate is missing from one condition, which is the case this readout
+    # most needs to get right (audit CM-19).
+    df <- raw_data()
+    per_group <- tapply(as.character(df$Replicate),
+                        interaction(df$Condition, df$Time_min, drop = TRUE),
+                        function(x) length(unique(x)))
+    per_group <- per_group[!is.na(per_group)]
+    if (length(per_group) == 0) return("0")
+    lo <- min(per_group); hi <- max(per_group)
+    if (lo == hi) paste(hi, "per group") else paste0(lo, "-", hi, " per group (unbalanced)")
+  })
 
   output$feature_diagnostics_table <- renderDT({
     req(raw_data(), measure_cols()); df <- raw_data(); mc <- measure_cols()
@@ -3203,10 +3773,11 @@ server <- function(input, output, session) {
   })
 
   # === DISTRIBUTIONS TAB ===
-  dist_plot_obj <- reactive({
-    req(transformed_data(), input$measure, input$dist_type)
-    df  <- transformed_data(); m <- input$measure; rs <- rep_summ(); cols <- cond_colors()
-    mlbl <- measure_label()
+  # The sample / timepoint filters, shared by the figure and its data export so
+  # the CSV always holds exactly the replicate summaries the figure drew.
+  dist_subset <- reactive({
+    req(transformed_data(), input$measure)
+    df <- transformed_data(); rs <- rep_summ()
 
     # ── Apply sample filter (checkboxes) ────────────────────────────────────
     sel_conds <- input$dist_cond_sel
@@ -3227,6 +3798,17 @@ server <- function(input, output, session) {
       if (!is.null(rs)) rs <- rs[rs$Time_min %in% sel_times, , drop = FALSE]
     }
 
+    # Drop unused factor levels after filtering
+    if (is.factor(df$Condition)) df$Condition <- droplevels(df$Condition)
+    list(df = df, rs = rs)
+  })
+
+  dist_plot_obj <- reactive({
+    req(transformed_data(), input$measure, input$dist_type)
+    m <- input$measure; cols <- cond_colors()
+    mlbl <- measure_label(); mttl <- measure_title()
+    sub <- dist_subset(); df <- sub$df; rs <- sub$rs
+
     if (nrow(df) == 0) {
       return(ggplot() +
                annotate("text", x=0.5, y=0.5, label="No data — check sample / timepoint filters",
@@ -3234,18 +3816,16 @@ server <- function(input, output, session) {
                theme_void())
     }
 
-    # Drop unused factor levels after filtering
-    if (is.factor(df$Condition)) df$Condition <- droplevels(df$Condition)
-
-    # Recompute cols after possible subsetting
+    # Look the surviving conditions up BY NAME in the shared palette. Until
+    # 3.3.0 the colours were rebuilt positionally from the filtered levels, so
+    # hiding one condition shifted the colours of all the others and the
+    # Distributions tab stopped matching the Pub Figure.
     cond_levels_now <- if (is.factor(df$Condition)) levels(df$Condition) else unique(df$Condition)
-    n_now  <- length(cond_levels_now)
-    dcols2 <- if (n_now <= 2) c("#4A90D9","#D94A4A") else scales::hue_pal()(n_now)
-    cols   <- sapply(seq_along(cond_levels_now), function(i) {
-      v <- if (has_colourpicker) input[[paste0("color_", i)]] else NULL
-      if (!is.null(v) && nchar(v) > 0) v else dcols2[i]
-    })
-    cols <- setNames(cols, cond_levels_now)
+    n_now <- length(cond_levels_now)
+    cols  <- cols[cond_levels_now]
+    miss  <- is.na(cols)
+    if (any(miss)) cols[miss] <- default_cond_colors(n_now)[miss]
+    cols  <- setNames(as.character(cols), cond_levels_now)
 
     df$Time_fac <- factor(fmt_time(df$Time_min),
                           levels = fmt_time(sort(unique(df$Time_min))))
@@ -3323,11 +3903,10 @@ server <- function(input, output, session) {
     }, numeric(1))
     cell_shape <- suppressWarnings(as.numeric(input$dist_cell_shape %||% 19))
     if (is.na(cell_shape)) cell_shape <- 19
-    # Okabe-Ito colorblind-safe palette for replicate coloring
-    okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
-                   "#D55E00", "#CC79A7", "#999999")
-    rep_cols <- setNames(rep(okabe_ito, length.out = max(1, nlevels(df$Rep_fac))),
-                         levels(df$Rep_fac))
+    # Replicates take the colourblind-safe colours the conditions are not using.
+    # Chosen against the FULL condition palette, not the filtered one, so a
+    # replicate keeps its colour whichever conditions are shown.
+    rep_cols <- rep_colors_for(levels(df$Rep_fac), cond_colors())
 
     # --- Build base plot ---
     if (input$dist_type == "violin") {
@@ -3370,7 +3949,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Sample", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "Distributions"),
+                      title = paste("Single-Cell", mttl, "Distributions"),
                       subtitle = paste0("Violins = cell distributions; dots = replicate ", stat_type, "s; bar = group ", stat_type, ". Sample labels shown on X axis."))
       } else {
         p <- ggplot(df, aes(x = x_var_col, y = .data[[m]], fill = fill_var)) +
@@ -3406,7 +3985,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = x_label_base, y = mlbl,
-                      title = paste("Single-Cell", mlbl, "Distributions"),
+                      title = paste("Single-Cell", mttl, "Distributions"),
                       subtitle = paste0("Violins = cell distributions; dots = replicate ", stat_type, "s; bar = group ", stat_type))
       }
 
@@ -3423,7 +4002,7 @@ server <- function(input, output, session) {
       df$Group <- factor(df$Group, levels = group_levels)
       p <- ggplot(df, aes(x = .data[[m]], y = Group, fill = Condition)) +
         ggridges::geom_density_ridges(alpha = 0.7, scale = 1.3, linewidth = 0.3) +
-        scale_fill_manual(values = cols) + labs(x = mlbl, y = NULL, title = paste("Ridge Plot --", mlbl))
+        scale_fill_manual(values = cols) + labs(x = mlbl, y = NULL, title = paste("Ridge Plot --", mttl))
 
     } else if (input$dist_type == "strip") {
       if (sample_x_mode) {
@@ -3453,7 +4032,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Sample", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Jitter Plot"),
+                      title = paste("Single-Cell", mttl, "-- Jitter Plot"),
                       subtitle = paste0("Each point = one cell; bar = group ", stat_type, "; circles = replicate ", stat_type, "s."))
       } else {
         if (cells_by_rep) {
@@ -3483,7 +4062,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Time Post-Infection", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Jitter Plot"),
+                      title = paste("Single-Cell", mttl, "-- Jitter Plot"),
                       subtitle = paste0("Each point = one cell; bar = group ", stat_type, "; circles = replicate ", stat_type, "s"))
       }
 
@@ -3520,7 +4099,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Sample", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Sina Plot"),
+                      title = paste("Single-Cell", mttl, "-- Sina Plot"),
                       subtitle = paste0("Density-spread points; dots = replicate ", stat_type, "s; bar = group ", stat_type))
       } else {
         if (cells_by_rep) {
@@ -3561,7 +4140,7 @@ server <- function(input, output, session) {
           }
         }
         p <- p + labs(x = "Time Post-Infection", y = mlbl,
-                      title = paste("Single-Cell", mlbl, "-- Sina Plot"),
+                      title = paste("Single-Cell", mttl, "-- Sina Plot"),
                       subtitle = paste0("Density-spread points; dots = replicate ", stat_type, "s; bar = group ", stat_type))
       }
 
@@ -3575,7 +4154,7 @@ server <- function(input, output, session) {
                        width = 0.3, linewidth = 0.5, color = "black") +
           scale_color_manual(values = time_fill_cols, guide = "none") +
           labs(x = "Sample", y = paste(tools::toTitleCase(stat_type), mlbl, "(per replicate)"),
-               title = paste(mlbl, "-- Replicate Summary"),
+               title = paste(mttl, "-- Replicate Summary"),
                subtitle = paste0("Each point = one replicate ", stat_type, "; crossbar = group ", stat_type))
       } else {
         p <- ggplot(rs, aes(x = Time_fac, y = .data[[stat_col]], color = Condition)) +
@@ -3586,7 +4165,7 @@ server <- function(input, output, session) {
                        position = position_dodge(0.5), width = 0.3, linewidth = 0.5) +
           scale_color_manual(values = cols) +
           labs(x = "Time Post-Infection", y = paste(tools::toTitleCase(stat_type), mlbl, "(per replicate)"),
-               title = paste(mlbl, "-- Replicate Summary"),
+               title = paste(mttl, "-- Replicate Summary"),
                subtitle = paste0("Each point = one replicate ", stat_type, "; crossbar = group ", stat_type))
       }
 
@@ -3609,7 +4188,7 @@ server <- function(input, output, session) {
                                 shape = 18, size = rep_sz, color = rep_col, alpha = rep_al, show.legend = FALSE)
           }
         }
-        p <- p + labs(x = "Sample", y = mlbl, title = paste("Box Plot --", mlbl),
+        p <- p + labs(x = "Sample", y = mlbl, title = paste("Box Plot --", mttl),
                       subtitle = paste0("Replicate ", stat_type, "s overlaid"))
       } else {
         p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
@@ -3628,7 +4207,7 @@ server <- function(input, output, session) {
                                 size = rep_sz, color = rep_col, alpha = rep_al)
           }
         }
-        p <- p + labs(x = "Time Post-Infection", y = mlbl, title = paste("Box Plot --", mlbl),
+        p <- p + labs(x = "Time Post-Infection", y = mlbl, title = paste("Box Plot --", mttl),
                       subtitle = paste0("Replicate ", stat_type, "s overlaid"))
       }
 
@@ -3636,7 +4215,7 @@ server <- function(input, output, session) {
       p <- ggplot(df, aes(x = .data[[m]], color = Condition)) +
         stat_ecdf(linewidth = 0.8) + scale_color_manual(values = cols) +
         {if (has_time()) facet_wrap(~ Time_fac, nrow = 1) else NULL} +
-        labs(x = mlbl, y = "Cumulative Proportion", title = paste("ECDF --", mlbl),
+        labs(x = mlbl, y = "Cumulative Proportion", title = paste("ECDF --", mttl),
              subtitle = "Rightward shift = larger values")
     } else if (input$dist_type == "histogram") {
       bins <- input$dist_hist_bins %||% 40
@@ -3645,14 +4224,14 @@ server <- function(input, output, session) {
           geom_histogram(bins = bins, alpha = 0.7, position = "identity", linewidth = 0.2, color = "white") +
           facet_wrap(~ Condition, scales = "free_y") +
           scale_fill_viridis_d(option = "plasma", name = "Time") +
-          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mlbl),
+          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mttl),
                subtitle = "Faceted by condition; colored by timepoint")
       } else {
         p <- ggplot(df, aes(x = .data[[m]], fill = Condition)) +
           geom_histogram(bins = bins, alpha = 0.7, position = "identity", linewidth = 0.2, color = "white") +
           facet_wrap(~ Condition, scales = "free_y") +
           scale_fill_manual(values = cols, guide = "none") +
-          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mlbl),
+          labs(x = mlbl, y = "Cell Count", title = paste("Histogram --", mttl),
                subtitle = "One panel per sample")
       }
 
@@ -3667,7 +4246,7 @@ server <- function(input, output, session) {
       p <- ggplot(freq, aes(x = Time_fac, y = pct, fill = size_bin)) +
         geom_col(position = "stack", width = 0.75) + facet_wrap(~ Condition) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
-        labs(x = "Time", y = "% of Cells", title = paste("Population Proportions --", mlbl),
+        labs(x = "Time", y = "% of Cells", title = paste("Population Proportions --", mttl),
              subtitle = "Cells binned into quartiles of the overall distribution") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
@@ -3685,7 +4264,7 @@ server <- function(input, output, session) {
         facet_grid(Condition ~ Time_fac,
                    labeller = labeller(Condition = function(x) wrap_axis_labels(x, 16))) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
-        labs(x = NULL, y = NULL, title = paste("Cell Size Composition --", mlbl),
+        labs(x = NULL, y = NULL, title = paste("Cell Size Composition --", mttl),
              subtitle = "Proportional pie chart; faceted by condition and time")
 
     } else if (input$dist_type == "donut") {
@@ -3702,13 +4281,13 @@ server <- function(input, output, session) {
         facet_grid(Condition ~ Time_fac,
                    labeller = labeller(Condition = function(x) wrap_axis_labels(x, 16))) +
         scale_fill_viridis_d(name = paste(mlbl, "Quartile")) +
-        labs(x = NULL, y = NULL, title = paste("Cell Composition --", mlbl, "(Donut)"),
+        labs(x = NULL, y = NULL, title = paste("Cell Composition --", mttl, "(Donut)"),
              subtitle = "Proportional donut chart; faceted by condition and time")
 
     } else {
       p <- ggplot(df, aes(x = Time_fac, y = .data[[m]], fill = Condition)) +
         geom_violin(position = position_dodge(0.8), alpha = 0.7) +
-        scale_fill_manual(values = cols) + labs(x = "Time", y = mlbl, title = paste(mlbl, "Distributions"))
+        scale_fill_manual(values = cols) + labs(x = "Time", y = mlbl, title = paste(mttl, "Distributions"))
     }
 
     # Human-readable legend titles: never leak internal names like "fill_var".
@@ -3721,8 +4300,9 @@ server <- function(input, output, session) {
     }
 
     # --- Significance brackets ---
-    # Test + correction follow the Statistics tab settings (single source of
-    # truth), so on-figure stars always agree with the Pairwise table.
+    # Test + correction follow the Statistics tab settings. The family does too,
+    # but only when that tab is left on its default within-time configuration --
+    # bracket_family_note() states it in the caption when it is not.
     sig_ymax <- NA_real_
     bracket_types <- c("violin", "strip", "sina", "boxstrip", "dotplot")
     if (isTRUE(input$show_sig) && !sample_x_mode && input$dist_type %in% bracket_types && length(unique(df$Condition)) >= 2) {
@@ -3800,7 +4380,7 @@ server <- function(input, output, session) {
           label_extra <- if (input$sig_label_style == "stars_p") 0.20 else 0.12
           sig_ymax <- max(bracket_base) + y_range * label_extra
         }
-        p <- p + labs(caption = sig_res$caption)
+        p <- p + labs(caption = paste0(sig_res$caption, bracket_family_note() %||% ""))
       }
     }
 
@@ -3912,19 +4492,63 @@ server <- function(input, output, session) {
   output$dl_dist <- downloadHandler(
     filename = function() paste0("distributions_", input$measure, ".", fmt_ext(input$dist_format)),
     content  = function(file) save_figure(file, dist_plot_obj(), input$dist_width, input$dist_height, input$dist_dpi, input$dist_format))
+  # The replicate summaries behind the figure (after the sample / timepoint
+  # filters), for replotting in Prism, Excel or another R session.
+  output$dl_dist_data <- downloadHandler(
+    filename = function() paste0("distributions_", input$measure, "_replicate_summaries.csv"),
+    content  = function(file) {
+      rs <- dist_subset()$rs
+      if (is.null(rs) || nrow(rs) == 0) rs <- data.frame()
+      out <- as.data.frame(rs)
+      if (nrow(out) > 0) out <- cbind(Measurement = measure_label(), out)
+      write.csv(out, file, row.names = FALSE)
+    })
+
+  # --- Keep the figure brackets and the Statistics table in one family --------
+  # The brackets always compare conditions WITHIN each timepoint, on replicate
+  # summaries, with the Statistics tab's test and correction. The Statistics tab
+  # builds its own family from the grouping columns and comparison mode, so the
+  # two agree only when it is set to "Pairwise within each time point" over
+  # Condition + Time_min -- which is now the shipped default. When it is set to
+  # anything else the caption says so, rather than leaving the reader to assume
+  # a bracket and a table row with different p-values are the same contrast
+  # (audit CM-6; the README used to claim the two "can never disagree").
+  bracket_family_note <- function() {
+    mode <- input$stat_compare_mode %||% "within_time"
+    cols <- input$stat_group_cols %||% c("Condition", "Time_min")
+    matches <- identical(mode, "within_time") && all(c("Condition", "Time_min") %in% cols)
+    if (matches) return(NULL)
+    paste0(" The Statistics tab is currently set to \"", mode, "\" over ",
+           paste(cols, collapse = " + "),
+           ", which is a different family of comparisons: its adjusted p-values will not match these brackets. ",
+           "Set it to \"Pairwise within each time point\" on Condition + Time_min for the two to agree.")
+  }
 
   # === TRAJECTORY TAB ===
   traj_plot_obj <- reactive({
     req(rep_summ(), cond_summ(), input$traj_summary)
     validate(need(has_time(),
       "This dataset has no time column, so there is no trajectory to plot. Use the Distributions tab to compare samples directly."))
-    rs <- rep_summ(); cs <- cond_summ(); cols <- cond_colors(); yvar <- input$traj_summary; mlbl <- measure_label()
+    rs <- rep_summ(); cs <- cond_summ(); cols <- cond_colors(); yvar <- input$traj_summary
+    mlbl <- measure_label(); mttl <- measure_title()
     ylab <- if (yvar == "median_val") paste("Median", mlbl, "per Replicate") else paste("Mean", mlbl, "per Replicate")
+    stat_word <- if (yvar == "median_val") "medians" else "means"
+
+    # Which spread the band / bars show. All three are computed across dishes in
+    # compute_condition_summaries(); the subtitle names the one drawn. (Until
+    # 3.3.0 the only choice was SEM, and with the trend line on, the "SEM" box
+    # silently drew loess's own confidence band instead.)
+    show_err <- isTRUE(input$traj_error)
+    err_kind <- if (show_err) (input$traj_error_type %||% "sem") else NULL
+    cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
+    cs$err  <- if (show_err) cs[[paste0(err_kind, "_", ifelse(yvar == "median_val", "median", "mean"))]] else NA_real_
+    use_ribbon <- show_err && input$traj_style == "ribbon"
+    use_bars   <- show_err && input$traj_style == "pointline"
+
     p <- ggplot()
-    if (input$traj_error && input$traj_style == "ribbon") {
-      cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
-      cs$sem  <- cs[[ifelse(yvar == "median_val", "sem_median", "sem_mean")]]
-      p <- p + geom_ribbon(data = cs, aes(x = Time_min, ymin = yvar - sem, ymax = yvar + sem, fill = Condition), alpha = 0.2) +
+    if (use_ribbon) {
+      p <- p + geom_ribbon(data = cs[is.finite(cs$err), , drop = FALSE],
+                           aes(x = Time_min, ymin = yvar - err, ymax = yvar + err, fill = Condition), alpha = 0.2) +
         scale_fill_manual(values = cols)
     }
     traj_pt_sz <- input$traj_point_size %||% 3
@@ -3932,18 +4556,29 @@ server <- function(input, output, session) {
     if (input$traj_connect_reps) p <- p + geom_line(data = rs, aes(x = Time_min, y = .data[[yvar]], group = interaction(Condition, Replicate), color = Condition), alpha = 0.4, linewidth = traj_ln_w * 0.4, linetype = "dashed")
     p <- p + geom_point(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition, shape = Replicate), size = traj_pt_sz, alpha = 0.8)
     if (input$traj_smooth) {
+      # The trend line is drawn without its own confidence band: the band/bars
+      # on this figure always come from the replicate summaries, so that one
+      # figure never carries two differently-defined intervals.
       n_times <- length(unique(rs$Time_min))
-      if (n_times >= 4) p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "loess", se = input$traj_error && input$traj_style == "pointline", linewidth = traj_ln_w, alpha = 0.15, span = 1)
-      else p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "lm", se = input$traj_error && input$traj_style == "pointline", linewidth = traj_ln_w, alpha = 0.15)
+      if (n_times >= 4) p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "loess", se = FALSE, linewidth = traj_ln_w, span = 1)
+      else p <- p + geom_smooth(data = rs, aes(x = Time_min, y = .data[[yvar]], color = Condition), method = "lm", se = FALSE, linewidth = traj_ln_w)
     }
-    if (input$traj_error && input$traj_style == "pointline" && !input$traj_smooth) {
-      cs$yvar <- cs[[ifelse(yvar == "median_val", "grand_median", "grand_mean")]]
-      cs$sem  <- cs[[ifelse(yvar == "median_val", "sem_median", "sem_mean")]]
-      p <- p + geom_errorbar(data = cs, aes(x = Time_min, ymin = yvar - sem, ymax = yvar + sem, color = Condition), width = 3, linewidth = 0.6)
+    if (use_bars) {
+      p <- p + geom_errorbar(data = cs[is.finite(cs$err), , drop = FALSE],
+                             aes(x = Time_min, ymin = yvar - err, ymax = yvar + err, color = Condition), width = 3, linewidth = 0.6)
     }
+
+    # Subtitle: every mark on the figure is named, with the real replicate count.
+    n_rng <- range(cs$n_reps, na.rm = TRUE)
+    n_txt <- if (n_rng[1] == n_rng[2]) n_rng[1] else paste0(n_rng[1], "-", n_rng[2])
+    parts <- paste0("Each point = one replicate ", sub("s$", "", stat_word), " (N = ", n_txt, " per group)")
+    if (input$traj_connect_reps) parts <- c(parts, "dashed lines connect replicates")
+    if (input$traj_smooth) parts <- c(parts, "solid line = trend")
+    if (use_ribbon) parts <- c(parts, paste0("band = ", error_measure_label(err_kind), " of replicate ", stat_word))
+    if (use_bars)   parts <- c(parts, paste0("bars = ", error_measure_label(err_kind), " of replicate ", stat_word))
     p <- p + scale_color_manual(values = cols) + scale_x_continuous(breaks = sort(unique(rs$Time_min))) +
-      labs(x = "Time Post-Infection (min)", y = ylab, title = paste(mlbl, "Trajectory Over Time"),
-           subtitle = "Each point = one replicate; dashed lines connect replicates") +
+      labs(x = "Time Post-Infection (min)", y = ylab, title = paste(mttl, "Trajectory Over Time"),
+           subtitle = paste(parts, collapse = "; ")) +
       get_theme(input, "traj")
     apply_custom_labs(p, input, "traj")
   })
@@ -3952,6 +4587,17 @@ server <- function(input, output, session) {
   output$dl_traj <- downloadHandler(
     filename = function() paste0("trajectory_", input$measure, ".", fmt_ext(input$traj_format)),
     content  = function(file) save_figure(file, traj_plot_obj(), input$traj_width, input$traj_height, input$traj_dpi, input$traj_format))
+  # Replicate summaries joined to the condition summaries (grand mean / median,
+  # SD, SEM, 95% CI, N) -- everything the trajectory figure is drawn from.
+  traj_plot_data <- reactive({
+    rs <- rep_summ(); cs <- cond_summ()
+    req(!is.null(rs), !is.null(cs))
+    out <- dplyr::left_join(as.data.frame(rs), as.data.frame(cs), by = c("Condition", "Time_min"))
+    cbind(Measurement = measure_label(), out)
+  })
+  output$dl_traj_data <- downloadHandler(
+    filename = function() paste0("trajectory_", input$measure, "_plot_data.csv"),
+    content  = function(file) write.csv(traj_plot_data(), file, row.names = FALSE))
 
   # === STATISTICS TAB ===
   stat_results <- reactiveVal(NULL)
@@ -3965,8 +4611,17 @@ server <- function(input, output, session) {
     results$method <- paste0("Flexible pairwise statistics on biological replicate-level ",
                              ifelse(yvar == "median_val", "medians", "means"))
     results$measurement <- m
-    results$comparison_mode <- input$stat_compare_mode %||% "vs_reference"
+    results$comparison_mode_requested <- input$stat_compare_mode %||% "within_time"
+    # Report the mode that was actually built, never the one that was asked for.
+    results$comparison_mode <- realised_comparison_mode(comparison_preview(),
+                                                       results$comparison_mode_requested)
+    results$comparison_mode_message <- attr(comparison_preview(), "mode_message")
+    if (!is.null(results$comparison_mode_message)) {
+      showNotification(results$comparison_mode_message, type = "warning", duration = 12)
+    }
     results$reference_group <- input$stat_reference_group %||% NA_character_
+    results$transform_used  <- input$data_transform %||% "none"
+    results$transform_label <- describe_transform(transformed_data(), m, input$data_transform)
     results$statistical_unit <- ifelse(yvar == "median_val", "replicate median", "replicate mean")
     results$grouping_variables <- paste(input$stat_group_cols %||% "Condition", collapse = ", ")
     results$p_adjust <- input$stat_p_adjust %||% "holm"
@@ -4001,53 +4656,111 @@ server <- function(input, output, session) {
       correction = input$stat_p_adjust %||% "holm",
       reference_group = input$stat_reference_group %||% NA_character_,
       measurement = m,
-      comparison_mode = input$stat_compare_mode %||% "vs_reference",
+      comparison_mode = results$comparison_mode,
       stat_unit = results$statistical_unit
     )
     results$pairwise <- pw
     results$comparison_preview <- comp_tbl
     results$replicate_summary <- rs_flex
+    results$pairwise_family_size <- nrow(pw)
+    results$pairwise_family <- paste0(
+      "Holm-type correction applied across all ", nrow(pw), " comparison",
+      if (nrow(pw) == 1) "" else "s", " in this table (one family), using \"",
+      results$p_adjust, "\".")
+    # Advisory only -- see format_assumption_diagnostics().
+    results$diagnostics <- tryCatch(assumption_diagnostics(rs_flex, yvar = "Stat_Value"),
+                                    error = function(e) NULL)
 
-    # Optional legacy global model for simple Condition x Time_min workflows.
-    if ((input$stat_method %||% "anova") == "anova" && all(c("Condition", "Time_min") %in% names(rs_flex))) {
-      rs_global <- rs_flex
-      rs_global$Condition <- factor(rs_global$Condition)
-      rs_global$Time_fac <- factor(rs_global$Time_min)
-      model <- tryCatch(aov(as.formula(paste0(yvar, " ~ Condition * Time_fac")), data = rs_global), error = function(e) NULL)
-      if (!is.null(model)) {
-        anova_tbl <- summary(model)
-        results$anova_summary <- anova_tbl
-        results$model <- model
-        ss <- anova_tbl[[1]][["Sum Sq"]]
-        if (length(ss) > 1) {
-          ss_r <- ss[length(ss)]
-          eta2 <- ss[-length(ss)] / (ss[-length(ss)] + ss_r)
-          results$partial_eta2 <- data.frame(Source = rownames(anova_tbl[[1]])[-length(ss)], partial_eta2 = round(eta2, 3))
-        }
-        results$shapiro <- tryCatch(shapiro.test(residuals(model)), error = function(e) NULL)
-      }
-    } else if ((input$stat_method %||% "skip") == "lmm") {
-      if (!has_lme4) {
-        showNotification("lme4 required for LMM. Flexible pairwise results were still generated.", type = "warning")
+    # --- Optional global model -------------------------------------------------
+    # Both branches now test each term against the error stratum it belongs to;
+    # see fit_rm_anova() and fit_lmm_safe(). Both run on transformed_data(), the
+    # same scale as the pairwise tests above, so one report never mixes scales.
+    gm <- input$stat_method %||% "anova"
+    if (gm == "anova" && all(c("Condition", "Time_min") %in% names(rs_flex))) {
+      fit <- fit_rm_anova(rs_flex, yvar = yvar)
+      results$global_model <- fit
+      results$global_model_kind <- "rm_anova"
+      if (isTRUE(fit$ok)) {
+        results$model <- fit$model
+        results$anova_text <- format_rm_anova(fit)
+        results$partial_eta2 <- data.frame(
+          Source = fit$table$Term,
+          `Tested against` = fit$table$Error_Stratum,
+          partial_eta2 = round(fit$table$partial_eta2, 3),
+          check.names = FALSE)
+        # Residuals of the equivalent fixed-effects fit, for the normality check.
+        resid_fit <- tryCatch(residuals(lm(as.formula(paste0(yvar, " ~ Condition * Time_fac + Rep_unique")),
+                                           data = fit$data)), error = function(e) NULL)
+        results$diagnostics <- tryCatch(assumption_diagnostics(rs_flex, yvar = "Stat_Value",
+                                                               residuals = resid_fit),
+                                        error = function(e) results$diagnostics)
       } else {
-        req(plot_data(), m)
-        df_lmm <- plot_data()
-        lmm_result <- fit_lmm_safe(df_lmm, m, transform = input$stat_transform %||% "none")
+        results$global_model_message <- fit$msg
+      }
+    } else if (gm == "anova") {
+      results$global_model_kind <- "rm_anova"
+      results$global_model_message <- paste0(
+        "The repeated-measures ANOVA needs Condition and Time_min among the grouping ",
+        "columns. Your groups are built from ", results$grouping_variables,
+        ", so no global model was fitted. The pairwise results above are unaffected.")
+    } else if (gm == "lmm") {
+      results$global_model_kind <- "lmm"
+      if (!has_lme4) {
+        showNotification("lme4 is required for the mixed model. The pairwise results were still generated.",
+                         type = "warning")
+        results$global_model_message <- "lme4 is not installed, so no mixed model was fitted."
+      } else {
+        # CM-14: the mixed model reads the SAME frame the pairwise tests read, so
+        # one report can no longer hold pairwise tests on log data and a model on
+        # raw data. The Data-tab transform is the only transform.
+        req(transformed_data(), m)
+        lmm_result <- fit_lmm_safe(transformed_data(), m, transform = "none")
+        results$lmm <- lmm_result
         results$lmm_warnings <- lmm_result$warnings
-        results$transform_used <- lmm_result$transform_used
-        results$method <- paste(results$method, "+ optional LMM/global model")
-        if (!is.null(lmm_result$model)) {
+        results$method <- paste(results$method, "+ mixed model")
+        if (isTRUE(lmm_result$fitted)) {
           results$model <- lmm_result$model
           results$anova_summary <- tryCatch(anova(lmm_result$model), error = function(e) NULL)
+          results$lmm_formula <- paste(deparse(lmm_result$formula), collapse = " ")
+          results$lmm_df_method <- lmm_result$df_method
           results$ranef_var <- tryCatch(as.data.frame(lme4::VarCorr(lmm_result$model)), error = function(e) NULL)
           if (has_emmeans) {
-            emm <- tryCatch(emmeans::emmeans(lmm_result$model, ~ Condition | Time_fac), error = function(e) NULL)
+            # CM-8: `~ Condition | Time_fac` makes Time_fac a `by` variable, so
+            # adjust="holm" corrected WITHIN each timepoint -- with two
+            # conditions that is one contrast per stratum and no correction at
+            # all, while the output was labelled "holm". Cross the factors so the
+            # family is every Condition-within-Time contrast, which is the family
+            # the documentation has always claimed.
+            emm <- tryCatch(emmeans::emmeans(lmm_result$model, ~ Condition * Time_fac),
+                            error = function(e) NULL)
             if (!is.null(emm)) {
               results$emmeans <- emm
-              results$pairwise_emm <- tryCatch(pairs(emm, adjust = "holm"), error = function(e) NULL)
+              # Pull the contrasts unadjusted and apply the correction here, over
+              # the whole table, so the family is unambiguous and matches the
+              # correction the user chose for the pairwise tests. emmeans' own
+              # `adjust=` is applied per `by` group, which is what produced the
+              # "holm" label on uncorrected p-values before.
+              cons <- tryCatch(as.data.frame(emmeans::contrast(
+                        emm, method = "pairwise", simple = "Condition",
+                        combine = TRUE, adjust = "none")),
+                        error = function(e) NULL)
+              if (!is.null(cons) && "p.value" %in% names(cons)) {
+                corr <- results$p_adjust
+                cons$p_raw <- cons$p.value
+                cons$p_adj <- if (is.null(corr) || corr == "none") cons$p_raw
+                              else p.adjust(cons$p_raw, method = corr)
+                cons$p.value <- NULL
+                cons$Significance <- make_significance_label(cons$p_adj)
+                results$emm_family <- paste0(
+                  "Condition contrasts at every timepoint, corrected as one family of ",
+                  nrow(cons), " (\"", corr, "\"), on Kenward-Roger degrees of freedom.")
+              }
+              results$pairwise_emm <- cons
               results$emm_summary <- tryCatch(as.data.frame(summary(emm)), error = function(e) NULL)
             }
           }
+        } else {
+          results$global_model_message <- paste(lmm_result$warnings, collapse = " ")
         }
       }
     }
@@ -4056,33 +4769,64 @@ server <- function(input, output, session) {
     showNotification("Flexible statistics complete. Pairwise tests used biological replicate summaries, not raw cells.", type = "message")
   })
 
-  output$stat_output <- renderPrint({
-    req(stat_results()); r <- stat_results()
+  # One report body, printed on screen and written to the downloaded .txt, so the
+  # two cannot drift apart.
+  print_stat_report <- function(r, include_tables = FALSE) {
     cat("=== METHOD ===\n", r$method, "\n\n")
     cat("Measurement:", r$measurement %||% input$stat_measure %||% input$measure, "\n")
+    cat("Transform:", r$transform_label %||% "none (raw values)", "\n")
     cat("Grouping variables:", r$grouping_variables %||% "Condition", "\n")
     cat("Comparison mode:", r$comparison_mode %||% NA, "\n")
+    if (!is.null(r$comparison_mode_message)) {
+      cat("  NOTE:", r$comparison_mode_message, "\n")
+    }
     cat("Reference group:", r$reference_group %||% NA, "\n")
     cat("Statistical unit:", r$statistical_unit %||% r$yvar_used, "\n")
     cat("Pairwise test:", r$test %||% NA, "\n")
-    cat("P-value correction:", r$p_adjust %||% NA, "\n\n")
+    cat("P-value correction:", r$p_adjust %||% NA, "\n")
+    if (!is.null(r$pairwise_family)) cat("Multiplicity family:", r$pairwise_family, "\n")
+    cat("\n")
     if (!is.null(r$test_suggestion)) {
       cat("=== TEST SUGGESTION / RATIONALE ===\n")
       cat(r$test_suggestion$summary, "\n\n")
     }
     cat("Raw cells are visualized, but pairwise hypothesis tests use biological replicate-level summaries.\n\n")
-    if (!is.null(r$transform_used) && r$transform_used != "none") cat("Transform:", r$transform_used, "\n\n")
-    if (!is.null(r$lmm_warnings)) cat("LMM Note:", r$lmm_warnings, "\n\n")
-    cat("=== OPTIONAL GLOBAL MODEL ===\n")
-    if (!is.null(r$anova_summary)) { print(r$anova_summary)
-      if (!has_lmerTest && grepl("Mixed", r$method)) cat("\nInstall 'lmerTest' for p-values.\n")
-    } else cat("Not run or not available for the selected grouping.\n")
+    if (include_tables) {
+      if (!is.null(r$descriptive)) { cat("=== DESCRIPTIVE ===\n"); print(as.data.frame(r$descriptive), row.names = FALSE); cat("\n") }
+      if (!is.null(r$pairwise))    { cat("=== FLEXIBLE PAIRWISE RESULTS ===\n"); print(as.data.frame(r$pairwise), row.names = FALSE); cat("\n") }
+    }
+    cat("=== GLOBAL MODEL ===\n")
+    if (!is.null(r$anova_text)) {
+      cat(r$anova_text, "\n")
+    } else if (!is.null(r$anova_summary)) {
+      cat(r$lmm$method %||% "Mixed model", "\n")
+      if (!is.null(r$lmm_formula)) cat("Formula:", r$lmm_formula, "\n")
+      if (!is.null(r$lmm_df_method)) cat("Degrees of freedom:", r$lmm_df_method, "\n")
+      print(r$anova_summary)
+    } else {
+      cat(r$global_model_message %||% "Not run, or not available for the selected grouping.\n")
+    }
+    if (!is.null(r$lmm_warnings) && length(r$lmm_warnings) > 0) {
+      cat("\nModel notes:\n"); for (w in r$lmm_warnings) cat("  -", w, "\n")
+    }
     if (!is.null(r$ranef_var)) { cat("\n=== RANDOM EFFECT VARIANCE ===\n"); print(r$ranef_var) }
-    if (!is.null(r$partial_eta2)) { cat("\n=== EFFECT SIZES (partial eta-squared) ===\n")
-      cat("small=0.01, medium=0.06, large=0.14\n"); print(r$partial_eta2, row.names = FALSE) }
+    if (!is.null(r$partial_eta2)) {
+      cat("\n=== EFFECT SIZES (partial eta-squared) ===\n")
+      cat("small=0.01, medium=0.06, large=0.14\n")
+      print(r$partial_eta2, row.names = FALSE)
+    }
+    if (!is.null(r$pairwise_emm)) {
+      cat("\n=== PAIRWISE (estimated marginal means) ===\n")
+      if (!is.null(r$emm_family)) cat(r$emm_family, "\n")
+      print(r$pairwise_emm)
+    }
+    cat("\n=== ASSUMPTION DIAGNOSTICS ===\n")
+    cat(format_assumption_diagnostics(r$diagnostics), "\n")
     cat("\nThe Pairwise tab is the primary flexible statistics output.\n")
-    if (!is.null(r$shapiro)) { cat(sprintf("\nShapiro-Wilk residual check: W=%.4f, p=%.4f\n", r$shapiro$statistic, r$shapiro$p.value)) }
-    if (!is.null(r$pairwise_emm)) { cat("\n=== PAIRWISE (emmeans) ===\n"); print(r$pairwise_emm) }
+  }
+
+  output$stat_output <- renderPrint({
+    req(stat_results()); print_stat_report(stat_results())
   })
 
   output$pairwise_table <- renderDT({
@@ -4237,25 +4981,9 @@ server <- function(input, output, session) {
     filename = function() paste0("stats_", input$stat_measure %||% input$measure, "_", Sys.Date(), ".txt"),
     content  = function(file) {
       r <- stat_results(); sink(file)
-      cat("CellMorphR Flexible Statistical Results\n"); cat("Date:", as.character(Sys.time()), "\n")
-      cat("Measure:", r$measurement %||% input$stat_measure %||% input$measure, "\n")
-      cat("Method:", r$method, "\n")
-      cat("Grouping variables:", r$grouping_variables %||% "Condition", "\n")
-      cat("Comparison mode:", r$comparison_mode %||% NA, "\n")
-      cat("Reference group:", r$reference_group %||% NA, "\n")
-      cat("Statistical unit:", r$statistical_unit %||% r$yvar_used, "\n")
-      cat("Pairwise test:", r$test %||% NA, "\n")
-      cat("P-value correction:", r$p_adjust %||% NA, "\n\n")
-      if (!is.null(r$test_suggestion)) {
-        cat("=== TEST SUGGESTION / RATIONALE ===\n")
-        cat(r$test_suggestion$summary, "\n\n")
-      }
-      cat("Important: raw cells are visualized, but pairwise hypothesis tests use biological replicate-level summaries.\n\n")
-      if (!is.null(r$descriptive)) { cat("=== DESCRIPTIVE ===\n"); print(as.data.frame(r$descriptive), row.names = FALSE) }
-      if (!is.null(r$pairwise)) { cat("\n=== FLEXIBLE PAIRWISE RESULTS ===\n"); print(as.data.frame(r$pairwise), row.names = FALSE) }
-      if (!is.null(r$anova_summary)) { cat("\n=== OPTIONAL GLOBAL MODEL ===\n"); print(r$anova_summary) }
-      if (!is.null(r$partial_eta2)) { cat("\n=== EFFECT SIZES ===\n"); print(r$partial_eta2, row.names = FALSE) }
-      if (!is.null(r$pairwise_emm)) { cat("\n=== PAIRWISE (emmeans) ===\n"); print(r$pairwise_emm) }
+      cat("CellMorphR ", APP_VERSION, " -- Flexible Statistical Results\n", sep = "")
+      cat("Date:", as.character(Sys.time()), "\n\n")
+      print_stat_report(r, include_tables = TRUE)
       sink()
     })
 
@@ -4278,22 +5006,34 @@ server <- function(input, output, session) {
       cv <- rs[[yvar]][rs$Condition == ref & rs$Time_min == tm]
       lapply(conds, function(cd) {
         tv <- rs[[yvar]][rs$Condition == cd & rs$Time_min == tm]
-        cm <- mean(cv); tm2 <- mean(tv); ps <- sqrt((var(cv) + var(tv)) / 2)
-        data.frame(Time_min = tm, Condition = cd, ctrl_mean = cm, trt_mean = tm2,
-          abs_diff = tm2 - cm, pct_change = if (abs(cm) > 1e-10) (tm2 - cm) / cm * 100 else NA,
-          cohens_d = if (ps > 0) (tm2 - cm) / ps else NA, is_control = FALSE)
+        cm <- mean(cv); tm2 <- mean(tv)
+        # Hedges' g with a noncentral-t interval, and NA (never an error) when a
+        # condition is absent or has a single replicate at this timepoint.
+        g <- hedges_g(cv, tv)
+        data.frame(Time_min = tm, Condition = cd,
+          n_reps_ref = length(cv[is.finite(cv)]), n_reps_cond = length(tv[is.finite(tv)]),
+          ctrl_mean = cm, trt_mean = tm2,
+          abs_diff = tm2 - cm,
+          pct_change = if (isTRUE(abs(cm) > 1e-10)) (tm2 - cm) / cm * 100 else NA_real_,
+          hedges_g = g$g, hedges_g_low = g$ci_low, hedges_g_high = g$ci_high,
+          note = g$note %||% NA_character_, is_control = FALSE,
+          stringsAsFactors = FALSE)
       }) %>% bind_rows()
     }) %>% bind_rows()
     # Add control baseline rows (effect size = 0)
-    ctrl_rows <- data.frame(Time_min = times, Condition = ref, ctrl_mean = NA, trt_mean = NA,
-      abs_diff = 0, pct_change = 0, cohens_d = 0, is_control = TRUE)
+    ctrl_rows <- data.frame(Time_min = times, Condition = ref,
+      n_reps_ref = NA_integer_, n_reps_cond = NA_integer_, ctrl_mean = NA, trt_mean = NA,
+      abs_diff = 0, pct_change = 0, hedges_g = 0, hedges_g_low = NA_real_,
+      hedges_g_high = NA_real_, note = NA_character_, is_control = TRUE,
+      stringsAsFactors = FALSE)
     rbind(ctrl_rows, trt_rows)
   })
 
   es_plot_obj <- reactive({
     req(es_data(), input$es_type)
-    esd <- es_data(); cols <- cond_colors(); yvar <- input$es_type; mlbl <- measure_label()
-    ylab <- switch(yvar, abs_diff = paste("Delta", mlbl), pct_change = paste("% Change in", mlbl), cohens_d = "Cohen's d")
+    esd <- es_data(); cols <- cond_colors(); yvar <- input$es_type; mlbl <- measure_label(); mttl <- measure_title()
+    ylab <- switch(yvar, abs_diff = paste("Delta", mlbl), pct_change = paste("% Change in", mlbl),
+                   hedges_g = "Hedges' g (95% CI)")
     # Filter control if not requested
     esd_plot <- if (isTRUE(input$es_show_control)) esd else esd[!esd$is_control, , drop = FALSE]
     validate(need(nrow(esd_plot) > 0 && any(!esd$is_control),
@@ -4320,10 +5060,29 @@ server <- function(input, output, session) {
       p <- p + geom_line(linewidth = 1.2) + geom_point(size = 4)
     }
     p <- p + scale_color_manual(values = cols_es) + scale_x_continuous(breaks = sort(unique(esd$Time_min))) +
-      labs(x = "Time (min)", y = ylab, title = paste("Effect on", mlbl, "Over Time"),
+      labs(x = "Time (min)", y = ylab, title = paste("Effect on", mttl, "Over Time"),
            subtitle = if (isTRUE(input$es_show_control)) "Control shown as baseline (0)" else "Treatment vs control") +
       get_theme(input, "es")
-    if (yvar == "cohens_d") p <- p + geom_hline(yintercept = c(-0.8, 0.8), linetype = "dotted", color = "grey70")
+    if (yvar == "hedges_g") {
+      # The guides are Cohen's conventional benchmarks, not thresholds for this
+      # experiment; they are only honest next to an interval, so the interval is
+      # drawn with them (audit CM-3).
+      ci <- esd_plot[!esd_plot$is_control & is.finite(esd_plot$hedges_g_low), , drop = FALSE]
+      if (nrow(ci) > 0) p <- p + geom_errorbar(
+        data = ci, aes(x = Time_min, ymin = hedges_g_low, ymax = hedges_g_high, color = Condition),
+        width = 2, linewidth = 0.6, alpha = 0.8, inherit.aes = FALSE)
+      p <- p + geom_hline(yintercept = c(-0.8, 0.8), linetype = "dotted", color = "grey70") +
+        labs(caption = paste0("Hedges' g (small-sample corrected) with 95% noncentral-t intervals, ",
+                              "computed on biological replicate summaries. Dotted lines are Cohen's ",
+                              "conventional |0.8| benchmark, not a significance threshold."))
+    }
+    dropped <- esd[!esd$is_control & is.na(esd$hedges_g) & !is.na(esd$note), , drop = FALSE]
+    if (yvar == "hedges_g" && nrow(dropped) > 0) {
+      p <- p + labs(subtitle = paste0(
+        (if (isTRUE(input$es_show_control)) "Control shown as baseline (0)" else "Treatment vs control"),
+        ". Not estimable at ", nrow(dropped), " condition-timepoint combination",
+        if (nrow(dropped) == 1) "" else "s", " (fewer than 2 replicates); see the Table tab."))
+    }
     apply_custom_labs(p, input, "es")
   })
 
@@ -4713,7 +5472,7 @@ server <- function(input, output, session) {
       geom_text(aes(label = cell_label), size = base_sz / 3, fontface = "bold") +
       labs(x = NULL, y = NULL, fill = "-log10(p)",
            title = "Multi-Feature Statistical Summary",
-           subtitle = paste0("Two-way ANOVA on replicate ",
+           subtitle = paste0("Repeated-measures ANOVA (dish as error stratum) on replicate ",
                              if ((input$mf_summary %||% "median_val") == "mean_val") "means" else "medians",
                              ". * p<0.05, ** p<0.01, *** p<0.001"))
 
@@ -4732,9 +5491,10 @@ server <- function(input, output, session) {
 
   mf_importance_obj <- reactive({
     req(mf_results()); res <- mf_results()$results; req(nrow(res) > 0)
-    imp <- res %>% select(Feature, Condition_eta2, Time_eta2, Interaction_eta2) %>%
+    imp <- res %>% select(Feature, Condition_partial_eta2, Time_partial_eta2, Interaction_partial_eta2) %>%
       pivot_longer(-Feature, names_to = "Effect", values_to = "eta2") %>%
-      mutate(Effect = recode(Effect, Condition_eta2 = "Condition", Time_eta2 = "Time", Interaction_eta2 = "Interaction"))
+      mutate(Effect = recode(Effect, Condition_partial_eta2 = "Condition",
+                             Time_partial_eta2 = "Time", Interaction_partial_eta2 = "Interaction"))
     imp$Effect <- factor(imp$Effect, levels = c("Condition", "Time", "Interaction"))
     ggplot(imp, aes(x = reorder(Feature, eta2), y = eta2, fill = Effect)) +
       geom_col(position = "dodge", alpha = 0.85) + coord_flip() +
@@ -5180,7 +5940,7 @@ server <- function(input, output, session) {
             label_extra <- if ((input$cm_sig_label %||% "stars") == "stars_p") 0.20 else 0.12
             max_bracket <- max(bracket_base) + y_range * label_extra
             p <- p + coord_cartesian(ylim = c(NA, max_bracket), clip = "off")
-            p <- p + labs(caption = sig_res$caption)
+            p <- p + labs(caption = paste0(sig_res$caption, bracket_family_note() %||% ""))
           }
         }
       }
@@ -5288,8 +6048,20 @@ server <- function(input, output, session) {
         geom_line(aes(group = interaction(Condition, Replicate)), alpha = 0.35, linewidth = 0.4, linetype = "dashed") +
         geom_point(aes(shape = Replicate), size = 2.5, alpha = 0.8) + scale_color_manual(values = cols) +
         scale_x_continuous(breaks = sort(unique(rs$Time_min))) + labs(x = "Time (min)", y = paste("Median", mlbl)) + theme_publication(base)
-      if (length(unique(rs$Time_min)) >= 4) ptj <- ptj + geom_smooth(method = "loess", se = TRUE, alpha = 0.12, linewidth = 1.1, span = 1)
+      if (length(unique(rs$Time_min)) >= 4) ptj <- ptj + geom_smooth(method = "loess", se = FALSE, linewidth = 1.1, span = 1)
       else ptj <- ptj + stat_summary(fun = mean, geom = "line", linewidth = 1.1)
+      # Error bars follow the Trajectories tab's choice (SD / SEM / 95% CI of the
+      # replicate medians) so panel B is the same figure the tab shows; the loess
+      # band is not drawn, for the same reason as on the tab.
+      if (isTRUE(input$traj_error %||% TRUE)) {
+        cs <- cond_summ()
+        if (!is.null(cs)) {
+          cs$err <- cs[[paste0(input$traj_error_type %||% "sem", "_median")]]
+          cs <- cs[is.finite(cs$err), , drop = FALSE]
+          ptj <- ptj + geom_errorbar(data = cs, aes(x = Time_min, ymin = grand_median - err, ymax = grand_median + err, color = Condition),
+                                     inherit.aes = FALSE, width = 3, linewidth = 0.5)
+        }
+      }
       # No in-panel legend: the composite carries one shared legend at the bottom
       panels[["traj"]] <- ptj + theme(legend.position = "none")
     }
@@ -5377,7 +6149,7 @@ server <- function(input, output, session) {
     req(has_patchwork)
     panels <- pub_panels_list()
     if (length(panels) == 0) return(NULL)
-    base <- input$pub_base_size %||% 11; mlbl <- measure_label()
+    base <- input$pub_base_size %||% 11; mttl <- measure_title()
     # Exactly one panel keeps its legend (the first); patchwork then collects it
     # into a single shared legend below the figure. Whichever panels the user
     # picks, no panel ends up with a legend spilling over its neighbours.
@@ -5388,7 +6160,7 @@ server <- function(input, output, session) {
     n_panels <- length(labeled)
     pub_title <- {
       ct <- input$pub_custom_title %||% ""
-      if (nzchar(trimws(ct))) ct else paste(mlbl, "-- Time Course")
+      if (nzchar(trimws(ct))) ct else paste(mttl, "-- Time Course")
     }
     # guides = "collect" lifts the single kept legend out of its panel and into
     # one shared legend under the whole figure, so it cannot overflow a panel.
@@ -5588,7 +6360,8 @@ server <- function(input, output, session) {
       "                   group = Condition, shape = factor(Replicate)),",
       "               position = position_dodge(0.8), size = 2.6, colour = \"black\", stroke = 0.7) +",
       '    scale_shape_manual(values = c(21, 22, 24, 23, 25), name = "Replicate") +',
-      "    scale_fill_manual(values = scales::hue_pal()(length(unique(d$Condition)))) +",
+      "    # Okabe-Ito colourblind-safe palette, the app's default since 3.3.0",
+      "    scale_fill_manual(values = rep_len(c('#0072B2','#D55E00','#009E73','#E69F00','#CC79A7','#56B4E9','#F0E442','#999999'), length(unique(d$Condition)))) +",
       paste0("    labs(x = ", q(if (isolate(has_time())) "Time" else "Sample"),
              ", y = ", q(m), ", fill = \"Condition\","),
       paste0("         title = paste(MEASURE, \"by condition\"),"),

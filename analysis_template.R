@@ -62,7 +62,8 @@ for (MEASURE in MEASURES) {
                    group = Condition, shape = factor(Replicate)),
                position = position_dodge(0.8), size = 2.6, colour = "black", stroke = 0.7) +
     scale_shape_manual(values = c(21, 22, 24, 23, 25), name = "Replicate") +
-    scale_fill_manual(values = scales::hue_pal()(length(unique(d$Condition)))) +
+    # Okabe-Ito colourblind-safe palette, the app's default since 3.3.0
+    scale_fill_manual(values = rep_len(c("#0072B2","#D55E00","#009E73","#E69F00","#CC79A7","#56B4E9","#F0E442","#999999"), length(unique(d$Condition)))) +
     labs(x = "Time", y = "Length", fill = "Condition",
          title = paste(MEASURE, "by condition"),
          subtitle = "Points = biological replicate medians",
