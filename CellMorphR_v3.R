@@ -457,6 +457,56 @@ cvd_label <- function(mode) {
          tritan = "tritanopia", grey = "greyscale", NULL)
 }
 
+# =============================================================================
+# FIGURE SIZE PRESETS (export settings, 3.4.0)
+# Common journal column widths. These change between journals and over time:
+# the UI says "check the journal's current author instructions". Heights are
+# a sensible default aspect, not a requirement. Base font: journals typically
+# ask for 5-8 pt text at final size.
+#   Nature:  89 mm single, 183 mm double  (nature.com/nature/for-authors/formatting-guide)
+#   Science: 2.25 / 4.75 / 7.25 in       (science.org/content/page/instructions-preparing-initial-manuscript)
+#   Cell:    85 / 114 / 174 mm            (cell.com/figureguidelines)
+#   PLOS:    max 7.5 in wide, 8.75 in tall (journals.plos.org/plosone/s/figures)
+# =============================================================================
+FIGURE_SIZE_PRESETS <- list(
+  "Custom"                         = NULL,
+  "Nature single column (89 mm)"   = list(width = 89 / 25.4,  height = 70 / 25.4,  base = 7),
+  "Nature double column (183 mm)"  = list(width = 183 / 25.4, height = 110 / 25.4, base = 7),
+  "Science 1 column (2.25 in)"     = list(width = 2.25,       height = 1.9,        base = 7),
+  "Science 1.5 column (4.75 in)"   = list(width = 4.75,       height = 3.4,        base = 7),
+  "Science 2 column (7.25 in)"     = list(width = 7.25,       height = 4.5,        base = 8),
+  "Cell 1 column (85 mm)"          = list(width = 85 / 25.4,  height = 70 / 25.4,  base = 7),
+  "Cell 1.5 column (114 mm)"       = list(width = 114 / 25.4, height = 85 / 25.4,  base = 7),
+  "Cell 2 column (174 mm)"         = list(width = 174 / 25.4, height = 110 / 25.4, base = 8),
+  "PLOS full width (7.5 in)"       = list(width = 7.5,        height = 5,          base = 8),
+  "Slide 16:9 (13.33 x 7.5 in)"    = list(width = 13.33,      height = 7.5,        base = 16),
+  "Poster panel (10 x 7 in)"       = list(width = 10,         height = 7,          base = 14)
+)
+
+# Free-text figure annotations typed as one "x | y | text" per line. x may be a
+# number or, on a discrete axis, the category label. x is returned numeric only
+# when every line is numeric; otherwise all x are kept as strings, which ggplot
+# places on a discrete axis by name.
+parse_annotations <- function(txt) {
+  empty <- data.frame(x = character(), y = numeric(), label = character(), stringsAsFactors = FALSE)
+  if (is.null(txt) || !nzchar(trimws(txt))) return(empty)
+  lines <- trimws(strsplit(txt, "\n", fixed = TRUE)[[1]])
+  lines <- lines[nzchar(lines)]
+  rows <- lapply(lines, function(l) {
+    parts <- trimws(strsplit(l, "|", fixed = TRUE)[[1]])
+    if (length(parts) < 3) return(NULL)
+    y <- suppressWarnings(as.numeric(parts[2]))
+    if (!is.finite(y)) return(NULL)
+    data.frame(x = parts[1], y = y, label = paste(parts[-(1:2)], collapse = " | "), stringsAsFactors = FALSE)
+  })
+  rows <- rows[!vapply(rows, is.null, logical(1))]
+  if (length(rows) == 0) return(empty)
+  out <- do.call(rbind, rows)
+  xn <- suppressWarnings(as.numeric(out$x))
+  if (all(is.finite(xn))) out$x <- xn
+  out
+}
+
 
 # =============================================================================
 # FLEXIBLE GROUPING + STATISTICS HELPERS (v2.6-flexstats)
@@ -1657,7 +1707,7 @@ figure_controls_ui <- function(prefix, def_width = 8, def_height = 5, show_legen
                     "Italic" = "italic", "Bold Italic" = "bold.italic")
   controls <- tagList(
     tags$p(tags$strong("Figure Appearance"), class = "mb-1 mt-2"),
-    sliderInput(paste0(prefix, "_base_size"), "Base font size", 8, 26, 12, 1),
+    sliderInput(paste0(prefix, "_base_size"), "Base font size", 5, 26, 12, 1),
     selectInput(paste0(prefix, "_font_family"), "Font family",
       choices = c("Sans-serif (Arial)" = "sans", "Serif (Times)" = "serif",
                   "Mono (Courier)" = "mono"),
@@ -1723,14 +1773,35 @@ figure_controls_ui <- function(prefix, def_width = 8, def_height = 5, show_legen
         textInput(paste0(prefix, "_custom_x_label"),  "X axis label", ""),
         textInput(paste0(prefix, "_custom_y_label"),  "Y axis label", ""),
         textInput(paste0(prefix, "_custom_legend"),   "Legend title", ""),
-        textInput(paste0(prefix, "_custom_caption"),  "Caption", "")
+        textInput(paste0(prefix, "_custom_caption"),  "Caption", ""),
+        if (prefix != "dist") tagList(
+          tags$label("Y axis range (blank = auto)", class = "small fw-bold"),
+          layout_columns(col_widths = c(6, 6), gap = "4px",
+            numericInput(paste0(prefix, "_custom_y_min"), NULL, value = NA, step = 0.1),
+            numericInput(paste0(prefix, "_custom_y_max"), NULL, value = NA, step = 0.1))
+        ) else NULL,
+        textAreaInput(paste0(prefix, "_custom_annot"), "Text annotations (one per line: x | y | text)", "",
+                      rows = 3, placeholder = "60 | 12.5 | lysis onset\n30 min | 8 | *"),
+        tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+          "x is a number, or the category label on a discrete axis; y is in data units."),
+        actionButton(paste0(prefix, "_labels_reset"), "Reset text to automatic",
+          class = "btn-sm btn-outline-secondary w-100 mt-1", icon = icon("rotate-left"))
       )
     ),
     tags$hr(),
     tags$p(tags$strong("Export Settings"), class = "mb-1"),
-    numericInput(paste0(prefix, "_width"), "Width (in)", def_width, 3, 20, 0.5),
-    numericInput(paste0(prefix, "_height"), "Height (in)", def_height, 2, 16, 0.5),
+    selectInput(paste0(prefix, "_size_preset"), "Size preset",
+      choices = names(FIGURE_SIZE_PRESETS), selected = "Custom"),
+    tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-6px;",
+      "Sets width, height, 300 dpi and a journal-style base font. Common guidance only: check the journal's current author instructions. For a small figure also reduce point and line sizes in this tab's options."),
+    checkboxInput(paste0(prefix, "_preview_size"), "Preview at export size (what you see is what you export)", FALSE),
+    conditionalPanel(paste0("input.", prefix, "_preview_size"),
+      selectInput(paste0(prefix, "_preview_zoom"), "Preview zoom",
+        choices = c("100%" = "1", "150%" = "1.5", "200%" = "2", "300%" = "3"), selected = "1")),
+    numericInput(paste0(prefix, "_width"), "Width (in)", def_width, 1, 30, 0.1),
+    numericInput(paste0(prefix, "_height"), "Height (in)", def_height, 1, 20, 0.1),
     numericInput(paste0(prefix, "_dpi"), "DPI", 300, 72, 600, 50),
+    checkboxInput(paste0(prefix, "_transparent"), "Transparent background (PNG/PDF/SVG)", FALSE),
     selectInput(paste0(prefix, "_format"), "File format",
       choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg", "TIFF" = "tiff", "EPS" = "eps",
                   "PPTX (editable)" = "pptx"), selected = "pdf")
@@ -1784,6 +1855,24 @@ apply_custom_labs <- function(p, input, prefix) {
     if (!is.null(p$labels$colour)) p <- p + labs(color = lg)
   }
   cap <- get_txt("_custom_caption");  if (!is.null(cap)) p <- p + labs(caption = cap)
+  # Y-axis range from the editor. Only when the plot has not set its own coord:
+  # the Distributions tab reserves headroom for brackets and the pie/donut
+  # charts are polar, and neither may be overwritten here.
+  y_min <- suppressWarnings(as.numeric(input[[paste0(prefix, "_custom_y_min")]] %||% NA))
+  y_max <- suppressWarnings(as.numeric(input[[paste0(prefix, "_custom_y_max")]] %||% NA))
+  if ((is.finite(y_min) || is.finite(y_max)) && isTRUE(p$coordinates$default)) {
+    p <- p + coord_cartesian(ylim = c(if (is.finite(y_min)) y_min else NA,
+                                      if (is.finite(y_max)) y_max else NA))
+  }
+  # Free-text annotations (x | y | text). Drawn in the plot's own units.
+  ann <- parse_annotations(input[[paste0(prefix, "_custom_annot")]])
+  if (nrow(ann) > 0) {
+    base <- input[[paste0(prefix, "_base_size")]] %||% 12
+    p <- tryCatch(
+      p + annotate("text", x = ann$x, y = ann$y, label = ann$label, size = base / 2.8,
+                   family = input[[paste0(prefix, "_font_family")]] %||% "sans"),
+      error = function(e) p)
+  }
   # A colour-vision simulation must never pass as the real palette: stamp it.
   cvd <- cvd_label(input$cvd_preview)
   if (!is.null(cvd)) {
@@ -1791,10 +1880,20 @@ apply_custom_labs <- function(p, input, prefix) {
     p <- p + labs(caption = paste0(if (!is.null(prev) && nzchar(prev)) paste0(prev, " ") else "",
                                    "Colours simulated for ", cvd, " (preview, not the chosen palette)."))
   }
-  # Fold long text so it never runs past the figure edge (auto or custom alike)
-  p$labels$title    <- wrap_plot_text(p$labels$title,    width = 70)
-  p$labels$subtitle <- wrap_plot_text(p$labels$subtitle, width = 105)
-  p$labels$caption  <- wrap_plot_text(p$labels$caption,  width = 110)
+  # Fold long text so it never runs past the figure edge (auto or custom alike).
+  # The fold width follows the EXPORT width and the font size: a 3.5-inch
+  # journal column at 7 pt holds a third of the characters an 8-inch figure at
+  # 12 pt does. (0.58 em is the average character width of a sans face.)
+  w_in <- suppressWarnings(as.numeric(input[[paste0(prefix, "_width")]] %||% 8)); if (!is.finite(w_in) || w_in <= 0) w_in <- 8
+  base <- suppressWarnings(as.numeric(input[[paste0(prefix, "_base_size")]] %||% 12)); if (!is.finite(base) || base <= 0) base <- 12
+  chars_for <- function(pt, fallback) {
+    pt <- suppressWarnings(as.numeric(pt))
+    if (length(pt) != 1 || !is.finite(pt) || pt <= 0) pt <- fallback   # blank per-element size = NA
+    max(20L, as.integer(floor(w_in * 72 / (0.58 * pt))))
+  }
+  p$labels$title    <- wrap_plot_text(p$labels$title,    width = chars_for(input[[paste0(prefix, "_title_size")]], base * 1.15))
+  p$labels$subtitle <- wrap_plot_text(p$labels$subtitle, width = chars_for(base * 0.85, base * 0.85))
+  p$labels$caption  <- wrap_plot_text(p$labels$caption,  width = chars_for(base * 0.7, base * 0.7))
   wrap_legend_labels(p)
 }
 
@@ -2188,7 +2287,10 @@ ui <- page_navbar(
           tags$hr(),
           tags$p(tags$strong("Session"), class = "mb-1"),
           downloadButton("save_session", "Save Session (.rds)", class = "btn-outline-primary btn-sm w-100"),
-          tags$p(class = "small mt-1", style = "color:#8888a8;", "Save data + settings to resume later."),
+          tags$p(class = "small mt-1", style = "color:#8888a8;", "Save data + settings, including every tab's figure text, typography and export size, to resume later."),
+          downloadButton("save_figure_style", "Save Figure Style (.json)", class = "btn-outline-secondary btn-sm w-100 mt-1"),
+          fileInput("load_figure_style", NULL, accept = ".json", placeholder = "Load figure style (.json)", width = "100%"),
+          tags$p(class = "small", style = "color:#8888a8; margin-top:-10px;", "A style file carries the figure settings only (no data), to reuse across datasets."),
           tags$hr(),
           fileInput("file_replace", "Upload New Data",
             accept = c(".xlsx", ".xls", ".csv", ".tsv"), placeholder = "Replace current data", multiple = TRUE),
@@ -2325,7 +2427,7 @@ ui <- page_navbar(
       ),
       navset_card_tab(
         nav_panel("Plot",
-          plotOutput("dist_plot", height = "600px", dblclick = "dist_plot_dblclick"),
+          uiOutput("dist_plot_ui"),
           edit_hint_ui()
         ),
         nav_panel("About",
@@ -2400,7 +2502,7 @@ ui <- page_navbar(
       ),
       navset_card_tab(
         nav_panel("Plot",
-          plotOutput("traj_plot", height = "550px", dblclick = "traj_plot_dblclick"),
+          uiOutput("traj_plot_ui"),
           edit_hint_ui()),
         nav_panel("About", tags$div(class = "p-3 small",
           tags$h6("Understanding Trajectory Plots"),
@@ -2464,7 +2566,7 @@ ui <- page_navbar(
       ),
       navset_card_tab(
         nav_panel("Plot",
-          plotOutput("frac_plot", height = "550px", dblclick = "frac_plot_dblclick"),
+          uiOutput("frac_plot_ui"),
           edit_hint_ui()),
         nav_panel("Table", DTOutput("frac_table")),
         nav_panel("About", tags$div(class = "p-3 small",
@@ -2510,7 +2612,7 @@ ui <- page_navbar(
       ),
       navset_card_tab(
         nav_panel("Morphospace",
-          plotOutput("pca_scatter", height = "550px", dblclick = "pca_scatter_dblclick"),
+          uiOutput("pca_scatter_ui"),
           edit_hint_ui()),
         nav_panel("Loadings",
           plotOutput("pca_loadings_bar", height = "500px"),
@@ -2581,7 +2683,7 @@ ui <- page_navbar(
           )
         ),
         nav_panel("Composition",
-          plotOutput("clust_composition", height = "450px", dblclick = "clust_composition_dblclick"),
+          uiOutput("clust_composition_ui"),
           edit_hint_ui()),
         nav_panel("Composition Table", DTOutput("clust_comp_table")),
         nav_panel("Characterization", DTOutput("clust_char_table")),
@@ -2778,7 +2880,7 @@ ui <- page_navbar(
       ),
       navset_card_tab(
         nav_panel("Plot",
-          plotOutput("es_plot", height = "450px", dblclick = "es_plot_dblclick"),
+          uiOutput("es_plot_ui"),
           edit_hint_ui()),
         nav_panel("Table", DTOutput("es_table")),
         nav_panel("About", tags$div(class = "p-3 small",
@@ -2841,7 +2943,7 @@ ui <- page_navbar(
       ),
       navset_card_tab(
         nav_panel("Stat Heatmap",
-          plotOutput("mf_heatmap", height = "500px", dblclick = "mf_heatmap_dblclick"),
+          uiOutput("mf_heatmap_ui"),
           edit_hint_ui()),
         nav_panel("Raw Heatmap", plotOutput("mf_raw_heatmap", height = "500px")),
         nav_panel("Spider/Radar", plotOutput("mf_radar_plot", height = "550px")),
@@ -2938,7 +3040,7 @@ ui <- page_navbar(
       ),
       navset_card_tab(
         nav_panel("Chart",
-          plotOutput("cm_chart", height = "550px", dblclick = "cm_chart_dblclick"),
+          uiOutput("cm_chart_ui"),
           edit_hint_ui()),
         nav_panel("Table", DTOutput("cm_table")),
         nav_panel("About", uiOutput("cm_about"))
@@ -2971,7 +3073,7 @@ ui <- page_navbar(
           "PPTX deck: one editable vector slide per panel (requires officer + rvg).")
       ),
       card(card_header("Composite Publication Figure"),
-           plotOutput("pub_plot", height = "550px", dblclick = "pub_plot_dblclick"),
+           uiOutput("pub_plot_ui"),
            edit_hint_ui())
     )
   ),
@@ -3142,7 +3244,7 @@ server <- function(input, output, session) {
   })
 
   # --- Apply typography to all tabs ---
-  all_fig_prefixes <- c("dist", "traj", "pca", "clust", "es", "mf", "cm", "pub")
+  all_fig_prefixes <- c("dist", "traj", "frac", "pca", "clust", "es", "mf", "cm", "pub")
   typo_fields <- c("base_size", "font_family", "legend_pos",
     "title_size", "title_face", "axis_title_size", "axis_title_face",
     "axis_text_size", "axis_text_face", "legend_title_size", "legend_title_face",
@@ -3164,13 +3266,117 @@ server <- function(input, output, session) {
             }
           }
         }
+        # Export size travels too, so a journal preset set once applies everywhere.
+        for (fld in c("width", "height", "dpi")) {
+          val <- input[[paste0(src, "_", fld)]]
+          if (!is.null(val) && is.finite(val)) updateNumericInput(session, paste0(tgt, "_", fld), value = val)
+        }
+        for (fld in c("format", "size_preset")) {
+          val <- input[[paste0(src, "_", fld)]]
+          if (!is.null(val)) updateSelectInput(session, paste0(tgt, "_", fld), selected = val)
+        }
+        if (!is.null(input[[paste0(src, "_transparent")]]))
+          updateCheckboxInput(session, paste0(tgt, "_transparent"), value = isTRUE(input[[paste0(src, "_transparent")]]))
       }
-      showNotification("Typography applied to all tabs.", type = "message")
+      showNotification("Typography and export size applied to all tabs.", type = "message")
     })
+    # Journal size presets: fill width / height / dpi / base font.
+    observeEvent(input[[paste0(src, "_size_preset")]], {
+      ps <- FIGURE_SIZE_PRESETS[[input[[paste0(src, "_size_preset")]]]]
+      if (is.null(ps)) return()
+      updateNumericInput(session, paste0(src, "_width"),  value = round(ps$width, 2))
+      updateNumericInput(session, paste0(src, "_height"), value = round(ps$height, 2))
+      updateNumericInput(session, paste0(src, "_dpi"),    value = 300)
+      updateSliderInput(session,  paste0(src, "_base_size"), value = ps$base)
+    }, ignoreInit = TRUE)
+    observeEvent(input[[paste0(src, "_labels_reset")]], reset_custom_labels(src))
+  })
+
+  # --- Preview at export size -------------------------------------------------
+  # Shiny's plotOutput fills its container, so the on-screen figure never has
+  # the aspect ratio, text size or spacing of the exported file. With the
+  # preview on, the figure is rendered through ggsave at exactly the export
+  # width and height (at 96 dpi x zoom) and shown as an image, so what is on
+  # screen is what the PDF/PNG will be. Each figure's output is a uiOutput that
+  # switches between the two.
+  register_sized_plot <- function(id, prefix, plot_fn, default_height) {
+    output[[paste0(id, "_ui")]] <- renderUI({
+      if (isTRUE(input[[paste0(prefix, "_preview_size")]])) {
+        w <- input[[paste0(prefix, "_width")]] %||% 8; h <- input[[paste0(prefix, "_height")]] %||% 5
+        z <- suppressWarnings(as.numeric(input[[paste0(prefix, "_preview_zoom")]] %||% "1")); if (!is.finite(z)) z <- 1
+        tagList(
+          tags$p(class = "small text-muted mb-1",
+            sprintf("Preview at export size: %.2f x %.2f in, shown at %d%%. Text and spacing match the exported file.", w, h, round(100 * z))),
+          tags$div(style = "overflow:auto; max-width:100%;",
+            imageOutput(paste0(id, "_img"), width = paste0(round(w * 96 * z), "px"), height = paste0(round(h * 96 * z), "px"),
+                        dblclick = paste0(id, "_dblclick")))
+        )
+      } else {
+        plotOutput(id, height = default_height, dblclick = paste0(id, "_dblclick"))
+      }
+    })
+    output[[paste0(id, "_img")]] <- renderImage({
+      w <- input[[paste0(prefix, "_width")]] %||% 8; h <- input[[paste0(prefix, "_height")]] %||% 5
+      z <- suppressWarnings(as.numeric(input[[paste0(prefix, "_preview_zoom")]] %||% "1")); if (!is.finite(z)) z <- 1
+      f <- tempfile(fileext = ".png")
+      ggsave(f, plot_fn(), width = w, height = h, dpi = 96 * z, bg = "white", limitsize = FALSE)
+      list(src = f, contentType = "image/png", width = round(w * 96 * z), height = round(h * 96 * z),
+           alt = "Figure preview at export size")
+    }, deleteFile = TRUE)
+  }
+
+  # --- Figure settings: collect / apply (Save Session and the .json style file) ---
+  # Every static figure-control input of every tab: typography, labels,
+  # annotations, axis range, export size and format. Restored through
+  # sendInputMessage, which reaches text, numeric, select, checkbox, slider and
+  # textarea bindings alike. Colour pickers are renderUI and are not included.
+  # Only the figure-control fields, by name: never a tab's analysis inputs (plot
+  # type, condition or timepoint filters, thresholds, normalisation), which
+  # belong to a dataset, not to a look. size_preset is left out on purpose: a
+  # restored preset would fire its observer after the restored width and
+  # height arrived and overwrite them; the dropdown reads "Custom" after a
+  # restore, which is accurate.
+  figure_setting_fields <- c(typo_fields, "grid", "border",
+    "custom_title", "custom_subtitle", "custom_x_label", "custom_y_label", "custom_legend",
+    "custom_caption", "custom_y_min", "custom_y_max", "custom_annot",
+    "width", "height", "dpi", "format", "transparent", "preview_size", "preview_zoom")
+  collect_figure_settings <- function() {
+    ids <- as.vector(outer(all_fig_prefixes, figure_setting_fields, paste, sep = "_"))
+    vals <- lapply(ids, function(id) input[[id]])
+    names(vals) <- ids
+    vals[!vapply(vals, function(v) is.null(v) || length(v) == 0 || !is.atomic(v), logical(1))]
+  }
+  apply_figure_settings <- function(s) {
+    if (!is.list(s)) return(0L)
+    allowed <- as.vector(outer(all_fig_prefixes, figure_setting_fields, paste, sep = "_"))
+    k <- 0L
+    for (id in intersect(names(s), allowed)) {
+      v <- s[[id]]
+      if (is.null(v) || length(v) == 0) next
+      if (is.list(v)) v <- unlist(v)
+      session$sendInputMessage(id, list(value = v)); k <- k + 1L
+    }
+    k
+  }
+  output$save_figure_style <- downloadHandler(
+    filename = function() paste0("CellMorphR_figure_style_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".json"),
+    content = function(file) {
+      s <- collect_figure_settings()
+      writeLines(jsonlite::toJSON(c(list(app_version = APP_VERSION, saved_at = format(Sys.time())), s),
+                                  auto_unbox = TRUE, pretty = TRUE, na = "null"), file)
+    })
+  observeEvent(input$load_figure_style, {
+    req(input$load_figure_style)
+    s <- tryCatch(jsonlite::fromJSON(input$load_figure_style$datapath, simplifyVector = TRUE), error = function(e) NULL)
+    if (!is.list(s)) { showNotification("That is not a CellMorphR figure style file.", type = "error"); return() }
+    s$app_version <- NULL; s$saved_at <- NULL
+    k <- apply_figure_settings(s)
+    showNotification(paste0("Figure style applied (", k, " settings)."), type = "message")
   })
 
   # --- Helper: Save figures ---
-  save_figure <- function(file, plot_obj, width, height, dpi, format) {
+  save_figure <- function(file, plot_obj, width, height, dpi, format, transparent = FALSE) {
+    bg <- if (isTRUE(transparent)) "transparent" else "white"
     # A colour-vision simulation must never leave the app looking like the real
     # palette: stamp every export, whichever tab it came from, and warn.
     cvd <- cvd_label(input$cvd_preview)
@@ -3188,14 +3394,14 @@ server <- function(input, output, session) {
     }
     if (format == "tiff") {
       ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "tiff",
-             compression = "lzw", bg = "white")
+             compression = "lzw", bg = bg)
     } else if (format == "eps") {
       if (isTRUE(capabilities("cairo"))) {
-        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = cairo_ps, bg = "white")
+        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = cairo_ps, bg = bg)
       } else {
         showNotification("Cairo is unavailable on this R build; using the standard postscript device (fonts are not embedded).",
                          type = "warning", duration = 8)
-        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "eps", bg = "white")
+        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "eps", bg = bg)
       }
     } else if (format == "pptx") {
       if (has_officer && has_rvg) {
@@ -3212,21 +3418,21 @@ server <- function(input, output, session) {
         }, error = function(e) {
           showNotification(paste("Editable PPTX export failed for this plot:", conditionMessage(e),
                                  "- saving a PDF-in-pptx fallback instead."), type = "warning", duration = 10)
-          ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "pdf")
+          ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "pdf", bg = bg)
         })
       } else {
         showNotification("Editable PPTX export needs the 'officer' and 'rvg' packages. Run run_cellmorphr.bat to install them, or install.packages(c('officer','rvg')). Saving PDF instead.",
                          type = "warning", duration = 10)
-        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "pdf")
+        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "pdf", bg = bg)
       }
     } else if (format == "svg") {
       if (requireNamespace("svglite", quietly = TRUE))
-        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = svglite::svglite)
-      else ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "svg")
+        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = svglite::svglite, bg = bg)
+      else ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "svg", bg = bg)
     } else if (format == "png") {
-      ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "png", bg = "white")
+      ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "png", bg = bg)
     } else {
-      ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "pdf")
+      ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "pdf", bg = bg)
     }
   }
   fmt_ext <- function(format) format
@@ -3393,7 +3599,17 @@ server <- function(input, output, session) {
           textInput("led_x",        "X axis label", cur("_custom_x_label")),
           textInput("led_y",        "Y axis label", cur("_custom_y_label")),
           textInput("led_legend",   "Legend title", cur("_custom_legend")),
-          textInput("led_caption",  "Caption",      cur("_custom_caption"))
+          textInput("led_caption",  "Caption",      cur("_custom_caption")),
+          if (prefix != "dist") tagList(
+            tags$label("Y axis range (blank = auto)", class = "small fw-bold"),
+            layout_columns(col_widths = c(6, 6), gap = "4px",
+              numericInput("led_y_min", NULL, value = isolate(input[[paste0(prefix, "_custom_y_min")]]) %||% NA, step = 0.1),
+              numericInput("led_y_max", NULL, value = isolate(input[[paste0(prefix, "_custom_y_max")]]) %||% NA, step = 0.1))
+          ) else tags$p(class = "small text-muted", "Y limits for this tab are in its sidebar (Axis Customization)."),
+          textAreaInput("led_annot", "Text annotations (one per line: x | y | text)",
+                        cur("_custom_annot"), rows = 3, placeholder = "60 | 12.5 | lysis onset"),
+          actionButton("led_reset", "Reset text to automatic",
+            class = "btn-outline-secondary btn-sm w-100 mt-1", icon = icon("rotate-left"))
         ),
         tags$div(
           tags$p(tags$strong("Sample names"), class = "mb-1"),
@@ -3459,6 +3675,11 @@ server <- function(input, output, session) {
     updateTextInput(session, paste0(prefix, "_custom_y_label"),  value = input$led_y %||% "")
     updateTextInput(session, paste0(prefix, "_custom_legend"),   value = input$led_legend %||% "")
     updateTextInput(session, paste0(prefix, "_custom_caption"),  value = input$led_caption %||% "")
+    updateTextAreaInput(session, paste0(prefix, "_custom_annot"), value = input$led_annot %||% "")
+    if (prefix != "dist") {
+      updateNumericInput(session, paste0(prefix, "_custom_y_min"), value = input$led_y_min %||% NA)
+      updateNumericInput(session, paste0(prefix, "_custom_y_max"), value = input$led_y_max %||% NA)
+    }
     if (!is.null(raw_data())) {
       conds <- unique(as.character(raw_data()$Condition))
       new_names <- vapply(seq_along(conds), function(i) input[[paste0("led_cond_", i)]] %||% conds[i], character(1))
@@ -3471,6 +3692,26 @@ server <- function(input, output, session) {
       }
     }
     removeModal()
+  })
+
+  # Blank every custom text field (editor button and sidebar button alike).
+  reset_custom_labels <- function(prefix) {
+    for (id in c("_custom_title", "_custom_subtitle", "_custom_x_label", "_custom_y_label",
+                 "_custom_legend", "_custom_caption"))
+      updateTextInput(session, paste0(prefix, id), value = "")
+    updateTextAreaInput(session, paste0(prefix, "_custom_annot"), value = "")
+    if (prefix != "dist") {
+      updateNumericInput(session, paste0(prefix, "_custom_y_min"), value = NA)
+      updateNumericInput(session, paste0(prefix, "_custom_y_max"), value = NA)
+    }
+  }
+  observeEvent(input$led_reset, {
+    prefix <- label_editor_prefix(); req(prefix)
+    for (id in c("led_title", "led_subtitle", "led_x", "led_y", "led_legend", "led_caption"))
+      updateTextInput(session, id, value = "")
+    updateTextAreaInput(session, "led_annot", value = "")
+    if (prefix != "dist") { updateNumericInput(session, "led_y_min", value = NA); updateNumericInput(session, "led_y_max", value = NA) }
+    reset_custom_labels(prefix)
   })
 
   # --- Split Condition into factor columns (e.g., vector + numeric dose) ---
@@ -3672,7 +3913,8 @@ server <- function(input, output, session) {
           measure = input$measure,
           ref_condition = input$ref_condition,
           data_transform = input$data_transform,
-          measure_units = reactiveValuesToList(measure_units)
+          measure_units = reactiveValuesToList(measure_units),
+          figure = collect_figure_settings()
         ),
         app_version = APP_VERSION,
         saved_at = Sys.time()
@@ -3699,6 +3941,7 @@ server <- function(input, output, session) {
       m_now <- s$measure %||% input$measure
       if (!is.null(m_now)) updateTextInput(session, "measure_unit", value = s$measure_units[[m_now]] %||% "")
     }
+    if (is.list(s$figure)) apply_figure_settings(s$figure)
     pending_session_settings(NULL)
   }, ignoreInit = TRUE)
 
@@ -4830,9 +5073,10 @@ server <- function(input, output, session) {
   })
 
   output$dist_plot <- renderPlot({ dist_plot_obj() })
+  register_sized_plot("dist_plot", "dist", dist_plot_obj, "600px")
   output$dl_dist <- downloadHandler(
     filename = function() paste0("distributions_", input$measure, ".", fmt_ext(input$dist_format)),
-    content  = function(file) save_figure(file, dist_plot_obj(), input$dist_width, input$dist_height, input$dist_dpi, input$dist_format))
+    content  = function(file) save_figure(file, dist_plot_obj(), input$dist_width, input$dist_height, input$dist_dpi, input$dist_format, transparent = isTRUE(input$dist_transparent)))
   # The replicate summaries behind the figure (after the sample / timepoint
   # filters), for replotting in Prism, Excel or another R session.
   output$dl_dist_data <- downloadHandler(
@@ -4977,9 +5221,10 @@ server <- function(input, output, session) {
   })
 
   output$traj_plot <- renderPlot({ traj_plot_obj() })
+  register_sized_plot("traj_plot", "traj", traj_plot_obj, "550px")
   output$dl_traj <- downloadHandler(
     filename = function() paste0("trajectory_", input$measure, ".", fmt_ext(input$traj_format)),
-    content  = function(file) save_figure(file, traj_plot_obj(), input$traj_width, input$traj_height, input$traj_dpi, input$traj_format))
+    content  = function(file) save_figure(file, traj_plot_obj(), input$traj_width, input$traj_height, input$traj_dpi, input$traj_format, transparent = isTRUE(input$traj_transparent)))
   # Replicate summaries joined to the condition summaries (grand mean / median,
   # SD, SEM, 95% CI, N) -- everything the trajectory figure is drawn from.
   traj_plot_data <- reactive({
@@ -5135,9 +5380,10 @@ server <- function(input, output, session) {
     apply_custom_labs(p, input, "frac")
   })
   output$frac_plot <- renderPlot({ frac_plot_obj() })
+  register_sized_plot("frac_plot", "frac", frac_plot_obj, "550px")
   output$dl_frac <- downloadHandler(
     filename = function() paste0("threshold_fraction_", input$measure, ".", fmt_ext(input$frac_format)),
-    content  = function(file) save_figure(file, frac_plot_obj(), input$frac_width, input$frac_height, input$frac_dpi, input$frac_format))
+    content  = function(file) save_figure(file, frac_plot_obj(), input$frac_width, input$frac_height, input$frac_dpi, input$frac_format, transparent = isTRUE(input$frac_transparent)))
   frac_table_data <- reactive({
     rs <- frac_summ(); cs <- frac_cond_summ(); thr <- frac_threshold()
     out <- dplyr::left_join(as.data.frame(rs),
@@ -5710,10 +5956,11 @@ server <- function(input, output, session) {
   })
 
   output$es_plot <- renderPlot({ es_plot_obj() })
+  register_sized_plot("es_plot", "es", es_plot_obj, "450px")
   output$es_table <- renderDT({ req(es_data()); esd <- es_data(); esd[] <- lapply(esd, function(x) if (is.numeric(x)) round(x, 3) else x); datatable(esd, options = list(dom = 't')) })
   output$dl_es <- downloadHandler(
     filename = function() paste0("effect_sizes_", input$measure, ".", fmt_ext(input$es_format)),
-    content  = function(file) save_figure(file, es_plot_obj(), input$es_width, input$es_height, input$es_dpi, input$es_format))
+    content  = function(file) save_figure(file, es_plot_obj(), input$es_width, input$es_height, input$es_dpi, input$es_format, transparent = isTRUE(input$es_transparent)))
 
   # === MORPHOSPACE (PCA) TAB ===
   output$pca_exclude_features_ui <- renderUI({
@@ -5795,6 +6042,7 @@ server <- function(input, output, session) {
     if (!is.null(res) && res$ok) pca_scatter_obj()
     else { plot.new(); text(0.5, 0.5, if (!is.null(res)) res$msg else "Need >= 2 features.", cex = 1.2) }
   })
+  register_sized_plot("pca_scatter", "pca", function() { res <- pca_result(); req(!is.null(res) && res$ok); pca_scatter_obj() }, "550px")
   pca_scree_obj <- reactive({
     req(pca_result()); res <- pca_result(); req(res$ok)
     n <- min(ncol(res$var_explained), 10)
@@ -5806,7 +6054,7 @@ server <- function(input, output, session) {
   output$pca_scree <- renderPlot({ pca_scree_obj() })
   output$dl_pca_scree <- downloadHandler(
     filename = function() paste0("pca_scree.", fmt_ext(input$pca_format)),
-    content = function(file) save_figure(file, pca_scree_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format))
+    content = function(file) save_figure(file, pca_scree_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format, transparent = isTRUE(input$pca_transparent)))
 
   output$pca_loadings_table <- renderDT({
     req(pca_result()); res <- pca_result(); req(res$ok)
@@ -5869,7 +6117,7 @@ server <- function(input, output, session) {
   output$pca_loadings_bar <- renderPlot({ pca_loadings_bar_obj() })
   output$dl_pca_loadings <- downloadHandler(
     filename = function() paste0("pca_loadings.", fmt_ext(input$pca_format)),
-    content = function(file) save_figure(file, pca_loadings_bar_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format))
+    content = function(file) save_figure(file, pca_loadings_bar_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format, transparent = isTRUE(input$pca_transparent)))
 
   # --- Morphological Diversity Metrics ---
   pca_diversity_data <- reactive({
@@ -5943,12 +6191,12 @@ server <- function(input, output, session) {
   output$pca_diversity_plot <- renderPlot({ pca_diversity_plot_obj() })
   output$dl_pca_diversity <- downloadHandler(
     filename = function() paste0("pca_diversity.", fmt_ext(input$pca_format)),
-    content = function(file) save_figure(file, pca_diversity_plot_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format))
+    content = function(file) save_figure(file, pca_diversity_plot_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format, transparent = isTRUE(input$pca_transparent)))
 
   output$dl_pca <- downloadHandler(filename = function() paste0("morphospace.", fmt_ext(input$pca_format)),
-    content = function(file) save_figure(file, pca_scatter_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format))
+    content = function(file) save_figure(file, pca_scatter_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format, transparent = isTRUE(input$pca_transparent)))
   output$dl_pca_traj <- downloadHandler(filename = function() paste0("trajectory.", fmt_ext(input$pca_format)),
-    content = function(file) { req(input$pca_show_trajectories); save_figure(file, pca_traj_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format) })
+    content = function(file) { req(input$pca_show_trajectories); save_figure(file, pca_traj_obj(), input$pca_width, input$pca_height, input$pca_dpi, input$pca_format, transparent = isTRUE(input$pca_transparent)) })
 
   # === PHENOTYPES (CLUSTERING) TAB ===
   cluster_result <- reactiveVal(NULL)
@@ -5982,7 +6230,7 @@ server <- function(input, output, session) {
   output$clust_k_plot <- renderPlot({ clust_k_plot_obj() })
   output$dl_clust_k <- downloadHandler(
     filename = function() paste0("cluster_optimal_k.", fmt_ext(input$clust_format)),
-    content = function(file) save_figure(file, clust_k_plot_obj(), input$clust_width, input$clust_height, input$clust_dpi, input$clust_format))
+    content = function(file) save_figure(file, clust_k_plot_obj(), input$clust_width, input$clust_height, input$clust_dpi, input$clust_format, transparent = isTRUE(input$clust_transparent)))
 
   clust_pca_plot_obj <- reactive({
     req(cluster_result()); cr <- cluster_result()
@@ -5993,7 +6241,7 @@ server <- function(input, output, session) {
   output$clust_pca_plot <- renderPlot({ clust_pca_plot_obj() })
   output$dl_clust_pca <- downloadHandler(
     filename = function() paste0("cluster_pca.", fmt_ext(input$clust_format)),
-    content = function(file) save_figure(file, clust_pca_plot_obj(), input$clust_width, input$clust_height, input$clust_dpi, input$clust_format))
+    content = function(file) save_figure(file, clust_pca_plot_obj(), input$clust_width, input$clust_height, input$clust_dpi, input$clust_format, transparent = isTRUE(input$clust_transparent)))
 
   clust_comp_obj <- reactive({
     req(cluster_result()); cr <- cluster_result()
@@ -6007,6 +6255,7 @@ server <- function(input, output, session) {
   })
 
   output$clust_composition <- renderPlot({ clust_comp_obj() })
+  register_sized_plot("clust_composition", "clust", clust_comp_obj, "450px")
 
   output$clust_comp_table <- renderDT({
     req(cluster_result()); cr <- cluster_result()
@@ -6046,7 +6295,7 @@ server <- function(input, output, session) {
       colnames = c("Phenotype", "Feature", "N", "Mean", "Median", "SD", "IQR", "CV (%)"))
   })
   output$dl_clust <- downloadHandler(filename = function() paste0("phenotypes.", fmt_ext(input$clust_format)),
-    content = function(file) save_figure(file, clust_comp_obj(), input$clust_width, input$clust_height, input$clust_dpi, input$clust_format))
+    content = function(file) save_figure(file, clust_comp_obj(), input$clust_width, input$clust_height, input$clust_dpi, input$clust_format, transparent = isTRUE(input$clust_transparent)))
 
   # === MULTI-FEATURE SUMMARY TAB ===
   mf_results <- reactiveVal(NULL)
@@ -6111,6 +6360,7 @@ server <- function(input, output, session) {
   })
 
   output$mf_heatmap <- renderPlot({ mf_heatmap_obj() })
+  register_sized_plot("mf_heatmap", "mf", mf_heatmap_obj, "500px")
 
   mf_importance_obj <- reactive({
     req(mf_results()); res <- mf_results()$results; req(nrow(res) > 0)
@@ -6127,7 +6377,7 @@ server <- function(input, output, session) {
   output$mf_importance <- renderPlot({ mf_importance_obj() })
   output$dl_mf_importance <- downloadHandler(
     filename = function() paste0("feature_importance.", fmt_ext(input$mf_format)),
-    content = function(file) save_figure(file, mf_importance_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format))
+    content = function(file) save_figure(file, mf_importance_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format, transparent = isTRUE(input$mf_transparent)))
 
   output$mf_divergence_table <- renderDT({
     req(mf_results()); div <- mf_results()$divergence
@@ -6141,7 +6391,7 @@ server <- function(input, output, session) {
   })
 
   output$dl_mf_heatmap <- downloadHandler(filename = function() paste0("heatmap.", fmt_ext(input$mf_format)),
-    content = function(file) save_figure(file, mf_heatmap_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format))
+    content = function(file) save_figure(file, mf_heatmap_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format, transparent = isTRUE(input$mf_transparent)))
   output$dl_mf_table <- downloadHandler(filename = function() paste0("multifeature_", Sys.Date(), ".csv"),
     content = function(file) { req(mf_results()); write.csv(mf_results()$results, file, row.names = FALSE) })
 
@@ -6209,7 +6459,7 @@ server <- function(input, output, session) {
   output$mf_raw_heatmap <- renderPlot({ mf_raw_heatmap_obj() })
   output$dl_mf_raw_heatmap <- downloadHandler(
     filename = function() paste0("raw_heatmap.", fmt_ext(input$mf_format)),
-    content = function(file) save_figure(file, mf_raw_heatmap_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format))
+    content = function(file) save_figure(file, mf_raw_heatmap_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format, transparent = isTRUE(input$mf_transparent)))
 
   # --- SPIDER / RADAR PLOT ---
   output$mf_radar_time_ui <- renderUI({
@@ -6245,7 +6495,7 @@ server <- function(input, output, session) {
   output$mf_radar_plot <- renderPlot({ mf_radar_obj() })
   output$dl_mf_radar <- downloadHandler(
     filename = function() paste0("radar_plot.", fmt_ext(input$mf_format)),
-    content = function(file) save_figure(file, mf_radar_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format))
+    content = function(file) save_figure(file, mf_radar_obj(), input$mf_width, input$mf_height, input$mf_dpi, input$mf_format, transparent = isTRUE(input$mf_transparent)))
 
   # === CELL METRICS TAB ===
   cm_data <- reactive({
@@ -6577,6 +6827,7 @@ server <- function(input, output, session) {
   })
 
   output$cm_chart <- renderPlot({ cm_plot_obj() })
+  register_sized_plot("cm_chart", "cm", cm_plot_obj, "550px")
 
   output$cm_table <- renderDT({
     req(raw_data(), input$cm_measure)
@@ -6642,7 +6893,7 @@ server <- function(input, output, session) {
 
   output$dl_cm_plot <- downloadHandler(
     filename = function() paste0("cell_metrics.", fmt_ext(input$cm_format)),
-    content = function(file) save_figure(file, cm_plot_obj(), input$cm_width, input$cm_height, input$cm_dpi, input$cm_format))
+    content = function(file) save_figure(file, cm_plot_obj(), input$cm_width, input$cm_height, input$cm_dpi, input$cm_format, transparent = isTRUE(input$cm_transparent)))
   output$dl_cm_table <- downloadHandler(
     filename = function() paste0("cell_metrics_", input$cm_measure, "_", Sys.Date(), ".csv"),
     content = function(file) {
@@ -6798,8 +7049,9 @@ server <- function(input, output, session) {
   })
 
   output$pub_plot <- renderPlot({ if (has_patchwork) pub_plot_obj() })
+  register_sized_plot("pub_plot", "pub", function() { req(has_patchwork); pub_plot_obj() }, "550px")
   output$dl_pub <- downloadHandler(filename = function() paste0("figure_", input$measure, ".", fmt_ext(input$pub_format)),
-    content = function(file) save_figure(file, pub_plot_obj(), input$pub_width, input$pub_height, input$pub_dpi, input$pub_format))
+    content = function(file) save_figure(file, pub_plot_obj(), input$pub_width, input$pub_height, input$pub_dpi, input$pub_format, transparent = isTRUE(input$pub_transparent)))
 
   # === GUIDE / SCRIPT BUILDER =================================================
   output$guide_status <- renderUI({

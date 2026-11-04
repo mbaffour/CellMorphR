@@ -339,7 +339,8 @@ The sidebar controls everything downstream:
 | **Several files at once** | Select multiple CSV/Excel files (one per image, dish or condition); they are stacked with a `Source_File` column you can map to Condition or Replicate |
 | **Rename samples** | Edit condition names and timepoint labels (see Editing figures below) |
 | **Split Condition into factors** | Turn `pSJExD_gp75_100nM` into a `Condition_Base` plus a numeric `Dose_nM` column, enabling factorial grouping and the trend test |
-| **Save / Resume session** | Write an `.rds` you can reload later |
+| **Save / Resume session** | Write an `.rds` you can reload later; it now carries every tab's figure text, annotations, typography and export size |
+| **Save / Load figure style** | A `.json` of the figure settings alone, to reuse one look across datasets |
 
 ### 2. Distributions Tab
 
@@ -494,7 +495,11 @@ a figure, or as a **PowerPoint deck with one editable slide per panel**.
 **Double-click any figure** to open the editor and change:
 
 - title, subtitle, X and Y axis labels, legend title, caption
+- Y-axis range (every tab except Distributions, which has its own axis controls)
+- free-text annotations, one per line as `x | y | text` (x can be a number or a
+  category label such as `30 min`)
 - **condition names** and **timepoint labels** (for example "0 h", "Uninduced")
+- a **Reset text to automatic** button
 
 Renaming applies everywhere at once - every figure, every statistics table,
 every export. Timepoint labels are display-only: the underlying numeric time is
@@ -504,7 +509,19 @@ instrument-generated names.
 
 Every plot tab also has sidebar controls for fonts, sizes, per-element
 typography, legend position, gridlines, panel borders, point size and export
-dimensions - plus **Apply to all tabs** to propagate typography everywhere.
+dimensions - plus **Apply to all tabs** to propagate typography and export size
+everywhere.
+
+**Journal size presets** (Nature, Science, Cell, PLOS, 16:9 slide, poster
+panel) fill in width, height, 300 dpi and a journal-style base font; they are
+common guidance, so check the journal's current instructions. **Preview at
+export size** renders the on-screen figure at exactly the export dimensions,
+through the same code path as the download, so what you see is what the PDF
+will be. A **transparent background** option covers PNG, PDF, SVG and EPS.
+
+All of these settings are stored in a saved session, and **Save Figure Style
+(.json)** on the Data tab writes them alone so one look can be loaded onto
+another dataset.
 
 ### Exporting
 

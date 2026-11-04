@@ -62,6 +62,38 @@ reproduced exactly unless the new options are switched on.
   saying so, and the export shows a warning. Viridis time fills and fixed greys
   are not simulated.
 
+### Added — figure editing and export
+
+- **Journal size presets.** Each tab's Export Settings offer Nature (89 /
+  183 mm), Science (2.25 / 4.75 / 7.25 in), Cell (85 / 114 / 174 mm), PLOS full
+  width, a 16:9 slide and a poster panel. A preset sets width, height, 300 dpi
+  and a journal-style base font (7–8 pt). The base-font slider now goes down
+  to 5 pt. The values are common guidance, labelled as such; check the
+  journal's current instructions. "Apply to all tabs" now also copies the
+  export size, dpi, format and preset.
+- **Preview at export size.** A checkbox renders the on-screen figure through
+  the same `ggsave` path as the download, at exactly the export width and
+  height (96 dpi × a 100–300% zoom), so text size, spacing and aspect on
+  screen are what the PDF or PNG will be. Off by default; the normal
+  fill-the-panel view is unchanged.
+- **Editor extensions.** The double-click editor and the sidebar "Labels &
+  caption" panel gain a Y-axis range (every tab except Distributions, which
+  keeps its own axis controls and bracket headroom), free-text annotations
+  typed as `x | y | text` lines (x may be a number or a category label), and a
+  "Reset text to automatic" button. All of it goes through the one shared
+  label pipeline, so downloads match the screen.
+- **Figure settings survive Save Session**, and can be saved on their own as a
+  `.json` figure style and loaded onto another dataset: every tab's text,
+  annotations, axis range, typography, grid/border, export size, format and
+  transparency. Analysis choices (plot type, filters, thresholds,
+  normalisation), colour pickers and the size-preset dropdown are not part of
+  a style; after a restore the preset reads "Custom", which is accurate.
+- **Transparent background** checkbox for PNG, PDF, SVG and EPS export.
+- **Titles, subtitles and captions wrap to the export width.** They used to
+  fold at character counts tuned for an 8-inch figure, so at journal column
+  width the subtitle ran off the right edge; the fold now follows the export
+  width and the font size.
+
 ### Added — data
 
 - **Multi-file upload.** Select several CSV/TSV/Excel files (one per image,
@@ -81,6 +113,8 @@ reproduced exactly unless the new options are switched on.
 
 - The Script Builder does not yet emit the Thresholds analysis, the planner or
   the baseline normalisation.
+- No zipped "download every figure" and no theme presets; both are easy
+  follow-ups if wanted.
 
 ## 3.3.0 — 2026-11-04
 
