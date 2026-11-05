@@ -22,7 +22,7 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 
 | Version | App file | Status |
 |---------|----------|--------|
-| **3.3.0** (current) | `CellMorphR_v3.R` | Maintained. 10 analysis tabs, SuperPlot options, colourblind-safe default palette, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
+| **3.4.0** (current) | `CellMorphR_v3.R` | Maintained. 11 analysis tabs, SuperPlot options, fraction-of-cells-beyond-threshold analysis, replicate power planner, baseline-normalised trajectories, colourblind-safe default palette with colour-vision preview, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, multi-file import, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
 Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
@@ -164,6 +164,11 @@ CellMorphR handles this correctly:
 | Box + strip plots | âœ“ | â€” |
 | ECDF plots | âœ“ | âœ“ |
 | Temporal trajectory plots | âœ“ | âœ“ |
+| Baseline-normalised trajectories (fold change / difference) | âœ“ | â€” |
+| Fraction of cells beyond a threshold | âœ“ | â€” |
+| Replicate power planner | âœ“ | â€” |
+| Colour-vision preview | âœ“ | â€” |
+| Multi-file import | âœ“ | â€” |
 | Repeated-measures ANOVA | âœ“ | âœ“ |
 | Linear mixed models | âœ“ | â€” |
 | Pairwise comparisons (Holm-corrected) | âœ“ | âœ“ |
@@ -330,9 +335,12 @@ The sidebar controls everything downstream:
 | **Reference (control) condition** | The baseline for effect sizes and "vs control" comparisons |
 | **Data transform** | None / log / sqrt, applied to every measurement |
 | **Colour palette** | Okabe-Ito (colourblind-safe) by default, 8 other presets including Tol and the pre-3.3 Blue/Red, plus a per-condition colour picker |
+| **Preview colours as** | Simulates deuteranopia, protanopia, tritanopia or greyscale on every figure (caption says so) so you can check a palette before export |
+| **Several files at once** | Select multiple CSV/Excel files (one per image, dish or condition); they are stacked with a `Source_File` column you can map to Condition or Replicate |
 | **Rename samples** | Edit condition names and timepoint labels (see Editing figures below) |
 | **Split Condition into factors** | Turn `pSJExD_gp75_100nM` into a `Condition_Base` plus a numeric `Dose_nM` column, enabling factorial grouping and the trend test |
-| **Save / Resume session** | Write an `.rds` you can reload later |
+| **Save / Resume session** | Write an `.rds` you can reload later; it now carries every tab's figure text, annotations, typography and export size |
+| **Save / Load figure style** | A `.json` of the figure settings alone, to reuse one look across datasets |
 
 ### 2. Distributions Tab
 
@@ -372,10 +380,23 @@ Replicate summaries over time, with loess or linear trend and an error band or
 bars showing your choice of **SD, SEM or 95% CI** across biological replicates
 (never across cells). The subtitle always names the one drawn and the number
 of replicates per group. Each point is one biological replicate; dashed lines
-connect replicates. **Download Plot Data (CSV)** exports the replicate
-summaries together with the group mean, SD, SEM, 95% CI and N behind the
-figure. With no time column this tab explains that there is nothing to plot
-and points you back to Distributions.
+connect replicates. **Normalise to baseline** divides (fold change) or
+subtracts (difference) each replicate's own value at the earliest timepoint;
+fold changes are summarised by their geometric mean with log-scale error bars,
+and the subtitle names any dish dropped for lacking a baseline. **Download
+Plot Data (CSV)** exports the replicate summaries together with the group
+centre, SD, SEM, 95% CI and N behind the figure. With no time column this tab
+explains that there is nothing to plot and points you back to Distributions.
+
+### 3b. Thresholds Tab
+
+The filamentation readout: for every biological replicate, the percentage of
+cells whose raw measurement lies above (or below) a threshold, either a
+multiple of the reference condition's pooled baseline median (default 2×) or
+an absolute value. The per-dish percentages are plotted as points with the
+replicate mean and SD/SEM/95% CI across dishes, optionally with significance
+brackets that use the Statistics tab's test and correction on those per-dish
+values. Cells are never pooled into one proportion. Table and CSV export.
 
 ### 4. Morphospace (PCA) Tab
 
@@ -474,7 +495,11 @@ a figure, or as a **PowerPoint deck with one editable slide per panel**.
 **Double-click any figure** to open the editor and change:
 
 - title, subtitle, X and Y axis labels, legend title, caption
+- Y-axis range (every tab except Distributions, which has its own axis controls)
+- free-text annotations, one per line as `x | y | text` (x can be a number or a
+  category label such as `30 min`)
 - **condition names** and **timepoint labels** (for example "0 h", "Uninduced")
+- a **Reset text to automatic** button
 
 Renaming applies everywhere at once - every figure, every statistics table,
 every export. Timepoint labels are display-only: the underlying numeric time is
@@ -484,7 +509,19 @@ instrument-generated names.
 
 Every plot tab also has sidebar controls for fonts, sizes, per-element
 typography, legend position, gridlines, panel borders, point size and export
-dimensions - plus **Apply to all tabs** to propagate typography everywhere.
+dimensions - plus **Apply to all tabs** to propagate typography and export size
+everywhere.
+
+**Journal size presets** (Nature, Science, Cell, PLOS, 16:9 slide, poster
+panel) fill in width, height, 300 dpi and a journal-style base font; they are
+common guidance, so check the journal's current instructions. **Preview at
+export size** renders the on-screen figure at exactly the export dimensions,
+through the same code path as the download, so what you see is what the PDF
+will be. A **transparent background** option covers PNG, PDF, SVG and EPS.
+
+All of these settings are stored in a saved session, and **Save Figure Style
+(.json)** on the Data tab writes them alone so one look can be loaded onto
+another dataset.
 
 ### Exporting
 
@@ -1033,7 +1070,7 @@ If you use CellMorphR in your research, please cite:
   title   = {CellMorphR: Single-Cell Morphometry Analysis Suite for Bacteriophage Infection Experiments},
   year    = {2026},
   url     = {https://github.com/mbaffour/CellMorphR},
-  version = {3.3.0}
+  version = {3.4.0}
 }
 ```
 

@@ -68,3 +68,32 @@ test_that("replicate colours never coincide with the condition colours on the fi
   expect_length(intersect(toupper(rep8), toupper(OKABE_ITO)), 0)
   expect_equal(length(unique(rep8)), 4)
 })
+
+test_that("figure size presets are sane and start with Custom", {
+  expect_equal(names(FIGURE_SIZE_PRESETS)[1], "Custom")
+  expect_null(FIGURE_SIZE_PRESETS[["Custom"]])
+  for (nm in names(FIGURE_SIZE_PRESETS)[-1]) {
+    ps <- FIGURE_SIZE_PRESETS[[nm]]
+    expect_true(all(c("width", "height", "base") %in% names(ps)), info = nm)
+    expect_gt(ps$width, 1); expect_lt(ps$width, 20)
+    expect_gt(ps$height, 1); expect_lt(ps$height, 12)
+    expect_gte(ps$base, 5); expect_lte(ps$base, 26)
+  }
+  expect_equal(FIGURE_SIZE_PRESETS[["Nature single column (89 mm)"]]$width, 89 / 25.4)
+  expect_equal(FIGURE_SIZE_PRESETS[["Science 2 column (7.25 in)"]]$width, 7.25)
+})
+
+test_that("parse_annotations reads x | y | text lines and keeps x numeric only when all are", {
+  a <- parse_annotations("60 | 12.5 | lysis onset\n90 | 3 | a | b")
+  expect_equal(nrow(a), 2)
+  expect_type(a$x, "double"); expect_equal(a$x, c(60, 90))
+  expect_equal(a$label, c("lysis onset", "a | b"))
+  b <- parse_annotations("30 min | 8 | *\n60 | 9 | **")
+  expect_type(b$x, "character"); expect_equal(b$x, c("30 min", "60"))
+  # malformed lines are skipped; blank input is an empty frame
+  # malformed or empty-label lines are skipped
+  c <- parse_annotations("no pipes here\n | 5 | \n1 | notanumber | x\n\n2 | 4 | ok")
+  expect_equal(nrow(c), 1)
+  expect_equal(c$label, "ok"); expect_equal(c$x, 2)
+  expect_equal(nrow(parse_annotations("")), 0); expect_equal(nrow(parse_annotations(NULL)), 0)
+})
