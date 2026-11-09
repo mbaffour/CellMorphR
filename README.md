@@ -22,7 +22,7 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 
 | Version | App file | Status |
 |---------|----------|--------|
-| **3.7.0** (current) | `CellMorphR_v3.R` | Maintained. Legend draft with display choices, sample colour map (hex table, CSV export/import), legend key (standalone, text starter, on-figure) for every main figure, 11 analysis tabs, SuperPlot options, fraction-of-cells-beyond-threshold analysis, replicate power planner, baseline-normalised trajectories, colourblind-safe default palette with colour-vision preview, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, multi-file import, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
+| **3.8.0** (current) | `CellMorphR_v3.R` | Maintained. 12 tabs including a Legend tab, report workbook, unit picker, legend draft with display choices, sample colour map (hex table, CSV export/import), legend key (standalone, text starter, on-figure) for every main figure, 11 analysis tabs, SuperPlot options, fraction-of-cells-beyond-threshold analysis, replicate power planner, baseline-normalised trajectories, colourblind-safe default palette with colour-vision preview, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, multi-file import, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
 Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
@@ -331,7 +331,7 @@ The sidebar controls everything downstream:
 | Control | What it does |
 |---------|--------------|
 | **Measurement Variable** | Which column all the plots and statistics use |
-| **Measurement unit** | Optional, remembered per measurement (`µm²`, `µm`, `a.u.`); appended to the axis titles on the Distributions, Trajectories, Effect Sizes and Pub Figure tabs, e.g. `Area (µm²)`, or `log(Area [µm²])` under a transform |
+| **Measurement unit** | Dropdown of common microscopy units (`µm`, `µm²`, `µm³`, `nm`, `mm`, `px`, `px²`, `a.u.`, `%`, `ratio`, `degrees`, `fold`) that also accepts a typed unit; remembered per measurement; appended to the axis titles on the Distributions, Trajectories, Effect Sizes and Pub Figure tabs, e.g. `Area (µm²)`, or `log(Area [µm²])` under a transform |
 | **Reference (control) condition** | The baseline for effect sizes and "vs control" comparisons |
 | **Data transform** | None / log / sqrt, applied to every measurement |
 | **Colour palette** | Okabe-Ito (colourblind-safe) by default, 8 other presets including Tol and the pre-3.3 Blue/Red, plus a per-condition colour picker |
@@ -341,6 +341,7 @@ The sidebar controls everything downstream:
 | **Rename samples** | Edit condition names and timepoint labels (see Editing figures below) |
 | **Split Condition into factors** | Turn `pSJExD_gp75_100nM` into a `Condition_Base` plus a numeric `Dose_nM` column, enabling factorial grouping and the trend test |
 | **Save / Resume session** | Write an `.rds` you can reload later; it now carries every tab's figure text, annotations, typography and export size |
+| **Download Report Workbook** | One `.xlsx` with a README of settings, cell metrics for every measurement, replicate and condition summaries, pairwise statistics, thresholds, power plan, colour map and legend drafts |
 | **Save / Load figure style** | A `.json` of the figure settings alone, to reuse one look across datasets |
 
 ### 2. Distributions Tab
@@ -542,6 +543,16 @@ Every main figure has a **Legend Key** block at the end of its sidebar:
   top-left. The composite keeps its shared legend along the bottom.
 
 The PPTX panel deck includes a legend-key slide.
+
+### Legend tab
+
+One place for every main figure's legend key and draft, drawn from the same
+live settings as the figure tabs: a key image and Download Key per figure, the
+full draft (what the marks are, the measurement, the key, the statistic, N,
+error measure, normalisation or threshold, the test, and the data behind it:
+cells, conditions and timepoints shown, replicates per group, source file,
+version and date), **Download All Legend Drafts (.txt)**, and the report
+workbook.
 
 ### Exporting
 
@@ -1090,7 +1101,7 @@ If you use CellMorphR in your research, please cite:
   title   = {CellMorphR: Single-Cell Morphometry Analysis Suite for Bacteriophage Infection Experiments},
   year    = {2026},
   url     = {https://github.com/mbaffour/CellMorphR},
-  version = {3.7.0}
+  version = {3.8.0}
 }
 ```
 

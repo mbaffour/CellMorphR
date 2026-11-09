@@ -122,7 +122,12 @@ legend extracted from the rendered figure, not a redrawn approximation, so it
 reproduces the plotted colours, fills, marker shapes, line types, labels and
 font exactly; the on-figure version is the same legend repositioned inside the
 panel. The accompanying text describes each legend entry with the nearest
-named colour and the plotting-symbol name.
+named colour and the plotting-symbol name, and the full legend draft adds
+what the marks represent, the measurement and unit, the figure's own subtitle
+and caption (statistic, N, error measure, normalisation or threshold, test and
+correction), and the data shown: number of cells, conditions and timepoints
+shown out of the total, biological replicates per group, source file, software
+version and date.
 
 **4. Export.** Figures are rendered with ggplot2 and exported at user-set
 dimensions and resolution as PDF, SVG, TIFF, EPS, PNG, or as editable vector

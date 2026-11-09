@@ -90,3 +90,20 @@ test_that("legend_draft_text assembles measurement, key, subtitle and caption in
                                    scale_colour_manual(values = c(Ctrl = "#0072B2", Trt = "#D55E00"))),
                "Condition: Ctrl (blue); Trt (vermillion).")
 })
+
+test_that("plot descriptions and the data sentence read correctly", {
+  expect_match(plot_description("dist", "violin"), "^Violins are kernel-density")
+  expect_match(plot_description("cm", "hexbin"), "Hexagons")
+  expect_match(plot_description("es", "hedges_g"), "Hedges' g")
+  expect_match(plot_description("traj"), "one biological replicate")
+  expect_equal(plot_description("traj", "no_such_type"), plot_description("traj"))   # falls back to the prefix entry
+  expect_null(plot_description("dist", "no_such_type"))                              # no prefix-level entry for dist
+  expect_null(plot_description("nope"))
+  s <- legend_data_sentence(4558, conds_shown = c("A", "C"), conds_total = c("A", "B", "C"),
+                            times_shown = c("0 min", "30 min"), times_total = c("0 min", "30 min", "60 min"),
+                            reps_range = c(3, 3), source = "example_data.csv", version = "3.8.0", date = "2026-11-09")
+  expect_equal(s, "Data: 4,558 cells; 2 of 3 conditions shown (A, C); 2 of 3 timepoints shown (0 min, 30 min); 3 biological replicates per group; source: example_data.csv; CellMorphR 3.8.0, 2026-11-09.")
+  s2 <- legend_data_sentence(100, conds_shown = c("WT", "Mut"), conds_total = c("WT", "Mut"), reps_range = c(2, 3))
+  expect_equal(s2, "Data: 100 cells; 2 conditions (WT, Mut); 2-3 biological replicates per group.")
+  expect_true("µm²" %in% UNIT_CHOICES)
+})

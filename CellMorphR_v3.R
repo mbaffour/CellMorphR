@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.7.0
+# Version 3.8.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.7.0.
+#   anti-pseudoreplication statistics. Version 3.8.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.7.0"
+APP_VERSION <- "3.8.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -671,6 +671,72 @@ legend_draft_text <- function(p, measurement = NULL, cvd = NULL) {
   )
   paste(parts, collapse = " ")
 }
+
+# What each figure type draws, in one sentence, for the legend draft.
+PLOT_DESCRIPTIONS <- c(
+  "dist:violin"      = "Violins are kernel-density outlines of the single-cell values in each group",
+  "dist:strip"       = "Each small point is one cell, jittered horizontally within its group",
+  "dist:sina"        = "Each small point is one cell, spread horizontally in proportion to the local density",
+  "dist:boxstrip"    = "Boxes span the interquartile range of the single-cell values with the median as the centre line; whiskers extend to 1.5 x IQR",
+  "dist:dotplot"     = "Each point is one biological replicate's summary value; cells are not drawn",
+  "dist:ridge"       = "Each ridge is the kernel density of the single-cell values in one group",
+  "dist:ecdf"        = "Each curve is the empirical cumulative distribution of the single-cell values in one group",
+  "dist:histogram"   = "Bars count cells per bin of the measurement",
+  "dist:stacked_bar" = "Stacked bars show the share of cells falling in each quartile of the pooled measurement",
+  "dist:pie"         = "Each pie shows the share of cells falling in each quartile of the pooled measurement",
+  "dist:donut"       = "Each ring shows the share of cells falling in each quartile of the pooled measurement",
+  "traj"             = "Each point is one biological replicate's summary value at one timepoint",
+  "frac"             = "Each point is the percentage of one biological replicate's cells beyond the threshold",
+  "es:abs_diff"      = "Each point is the difference between a treatment's replicate summaries and the reference condition's at that timepoint",
+  "es:pct_change"    = "Each point is the percent change of a treatment's replicate summaries relative to the reference condition at that timepoint",
+  "es:hedges_g"      = "Each point is Hedges' g between a treatment and the reference condition at that timepoint, with its 95% confidence interval",
+  "pca"              = "Each point is one cell placed by its scores on the first two principal components of the selected measurements",
+  "clust"            = "Bars show the share of cells assigned to each phenotype cluster in each group",
+  "mf"               = "Cells of the heatmap are -log10 p-values of the repeated-measures ANOVA terms for each measurement",
+  "cm:bar"           = "Bars show the chosen summary of all cells in each group",
+  "cm:line"          = "Lines connect the chosen summary of all cells in each group across timepoints",
+  "cm:violin"        = "Violins are kernel-density outlines of the single-cell values in each group",
+  "cm:boxplot"       = "Boxes span the interquartile range of the single-cell values with the median as the centre line",
+  "cm:ridgeline"     = "Each ridge is the kernel density of the single-cell values in one group",
+  "cm:ecdf"          = "Each curve is the empirical cumulative distribution of the single-cell values in one group",
+  "cm:scatter"       = "Each point is one cell plotted by two measurements",
+  "cm:hexbin"        = "Hexagons are shaded by the number of cells falling in them, across two measurements",
+  "cm:heatmap"       = "Cells of the heatmap show the chosen summary of all cells in each group",
+  "cm:bubble"        = "Bubble position shows the chosen summary and bubble size the chosen second metric",
+  "cm:radar"         = "Each polygon shows the mean of every measurement for one condition, scaled per axis",
+  "pub"              = "Composite of the selected panels; see the panel sentences"
+)
+plot_description <- function(prefix, type = NULL) {
+  key <- if (!is.null(type) && nzchar(type)) paste0(prefix, ":", type) else prefix
+  d <- PLOT_DESCRIPTIONS[key]
+  if (is.na(d)) d <- PLOT_DESCRIPTIONS[prefix]
+  if (is.na(d)) return(NULL)
+  paste0(unname(d), ".")
+}
+
+# The "what data" sentence of a legend: what is shown, out of what, from where.
+legend_data_sentence <- function(n_cells, conds_shown, conds_total, times_shown = NULL, times_total = NULL,
+                                 reps_range = NULL, source = NULL, version = NULL, date = NULL) {
+  fmt_n <- function(x) format(x, big.mark = ",")
+  cond_txt <- if (length(conds_total) > length(conds_shown))
+    paste0(length(conds_shown), " of ", length(conds_total), " conditions shown (", paste(conds_shown, collapse = ", "), ")")
+    else paste0(length(conds_shown), " condition", if (length(conds_shown) == 1) "" else "s", " (", paste(conds_shown, collapse = ", "), ")")
+  time_txt <- if (is.null(times_total) || length(times_total) <= 1) NULL
+    else if (length(times_total) > length(times_shown))
+      paste0(length(times_shown), " of ", length(times_total), " timepoints shown (", paste(times_shown, collapse = ", "), ")")
+    else paste0(length(times_total), " timepoints (", paste(times_total, collapse = ", "), ")")
+  rep_txt <- if (is.null(reps_range) || !all(is.finite(reps_range))) NULL
+    else if (reps_range[1] == reps_range[2]) paste0(reps_range[1], " biological replicates per group")
+    else paste0(reps_range[1], "-", reps_range[2], " biological replicates per group")
+  src_txt <- if (!is.null(source) && nzchar(source)) paste0("source: ", source) else NULL
+  ver_txt <- if (!is.null(version)) paste0("CellMorphR ", version, if (!is.null(date)) paste0(", ", date) else "") else NULL
+  paste0("Data: ", fmt_n(n_cells), " cells; ", paste(c(cond_txt, time_txt, rep_txt, src_txt, ver_txt), collapse = "; "), ".")
+}
+
+# Common microscopy units for the Data-tab selector; anything else can be typed.
+UNIT_CHOICES <- c("none" = "", "\u00b5m" = "\u00b5m", "\u00b5m\u00b2" = "\u00b5m\u00b2", "\u00b5m\u00b3" = "\u00b5m\u00b3",
+                  "nm" = "nm", "mm" = "mm", "px" = "px", "px\u00b2" = "px\u00b2", "a.u." = "a.u.", "%" = "%",
+                  "ratio" = "ratio", "degrees" = "degrees", "fold" = "fold")
 
 # The figure with every discrete legend shown, parked at the right (for the
 # standalone key) or placed inside the panel, top-left (for embedding).
@@ -2535,10 +2601,10 @@ ui <- page_navbar(
           tags$p(class = "small", style = "color:#8888a8;", "Plus numeric measurement columns."),
           tags$hr(),
           uiOutput("measure_selector"),
-          textInput("measure_unit", "Measurement unit (optional)", "",
-                    placeholder = "e.g. \u00b5m\u00b2, \u00b5m, a.u."),
+          selectizeInput("measure_unit", "Measurement unit (optional)", choices = UNIT_CHOICES, selected = "",
+                         options = list(create = TRUE, placeholder = "pick a unit or type your own")),
           tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-8px;",
-            "Remembered per measurement and added to every axis title, e.g. \"Area (\u00b5m\u00b2)\"."),
+            "Common microscopy units to pick from; type to add another. Remembered per measurement and added to every axis title, e.g. \"Area (\u00b5m\u00b2)\"."),
           uiOutput("condition_order_ui"),
           tags$hr(),
           tags$details(
@@ -2588,6 +2654,8 @@ ui <- page_navbar(
           tags$p(tags$strong("Session"), class = "mb-1"),
           downloadButton("save_session", "Save Session (.rds)", class = "btn-outline-primary btn-sm w-100"),
           tags$p(class = "small mt-1", style = "color:#8888a8;", "Save data + settings, including every tab's figure text, typography and export size, to resume later."),
+          downloadButton("dl_report_xlsx", "Download Report Workbook (.xlsx)", class = "btn-outline-primary btn-sm w-100 mt-1"),
+          tags$p(class = "small", style = "color:#8888a8; margin-top:4px;", "Every table in one Excel file: cell metrics for all measurements, replicate and condition summaries, pairwise statistics, thresholds, power plan, colour map and legend drafts, with a README sheet of settings."),
           downloadButton("save_figure_style", "Save Figure Style (.json)", class = "btn-outline-secondary btn-sm w-100 mt-1"),
           fileInput("load_figure_style", NULL, accept = ".json", placeholder = "Load figure style (.json)", width = "100%"),
           tags$p(class = "small", style = "color:#8888a8; margin-top:-10px;", "A style file carries the figure settings only (no data), to reuse across datasets."),
@@ -3353,7 +3421,10 @@ ui <- page_navbar(
         figure_controls_ui("cm", 8, 5),
         tags$hr(),
         downloadButton("dl_cm_plot", "Download Figure", class = "btn-primary w-100"),
-        downloadButton("dl_cm_table", "Download Table (CSV)", class = "btn-outline-primary w-100 mt-2")
+        downloadButton("dl_cm_table", "Download Table (CSV)", class = "btn-outline-primary w-100 mt-2"),
+        downloadButton("dl_report_xlsx_cm", "Download Report Workbook (.xlsx)", class = "btn-outline-secondary w-100 mt-2"),
+        tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
+          "All measurements' cell metrics plus every other table the app has computed, in one Excel file for reports.")
       ),
       navset_card_tab(
         nav_panel("Chart",
@@ -3392,6 +3463,39 @@ ui <- page_navbar(
       card(card_header("Composite Publication Figure"),
            uiOutput("pub_plot_ui"),
            edit_hint_ui())
+    )
+  ),
+
+  # === TAB 10b: LEGEND =========================================================
+  nav_panel(
+    title = "Legend",
+    icon  = icon("list-ul"),
+    tags$div(class = "p-3",
+      layout_columns(col_widths = c(8, 4),
+        tags$div(
+          tags$h5("Legend keys and drafts for every main figure"),
+          tags$p(class = "small text-muted",
+            "Each key is the figure's own legend and each draft is built from the figure's live settings: what the marks are, the measurement, the key, ",
+            "the statistic, N, error measure, normalisation or threshold, the test, and the data behind it. Change a figure and its entry here changes with it. ",
+            "Figures that have not been generated on their own tab (Multi-Feature needs its analysis run) say so.")
+        ),
+        tags$div(
+          selectInput("legend_tab_format", "Key file format",
+            choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg", "TIFF" = "tiff", "EPS" = "eps", "PPTX (editable)" = "pptx"), selected = "pdf"),
+          downloadButton("dl_all_legend_drafts", "Download All Legend Drafts (.txt)", class = "btn-primary w-100"),
+          downloadButton("dl_report_xlsx_legend", "Download Report Workbook (.xlsx)", class = "btn-outline-primary w-100 mt-2")
+        )
+      ),
+      lapply(c("dist", "traj", "frac", "es", "pca", "clust", "mf", "cm", "pub"), function(pf) {
+        title <- c(dist = "Distributions", traj = "Trajectories", frac = "Thresholds", es = "Effect Sizes",
+                   pca = "Morphospace", clust = "Phenotype Composition", mf = "Multi-Feature Heatmap",
+                   cm = "Cell Metrics", pub = "Composite Figure")[[pf]]
+        card(class = "mt-3", card_header(title),
+          layout_columns(col_widths = c(3, 9),
+            tags$div(plotOutput(paste0("legend_tab_key_", pf), height = "220px"),
+                     downloadButton(paste0("dl_legend_tab_key_", pf), "Download Key", class = "btn-sm btn-outline-primary w-100 mt-1")),
+            verbatimTextOutput(paste0("legend_tab_text_", pf), placeholder = TRUE)))
+      })
     )
   ),
 
@@ -3646,15 +3750,39 @@ server <- function(input, output, session) {
   # --- Legend key per figure ----------------------------------------------------
   # Everything is derived from the live plot reactive, so renamed conditions,
   # changed colours or a different sample selection show up at once.
-  register_legend_key <- function(prefix, plot_fn) {
-    key_grob <- reactive({
-      p <- plot_fn(); req(!is.null(p))
-      g <- extract_legend_grob(legend_key_plot(p, inside = FALSE))
-      validate(need(!is.null(g), "This figure has no legend to key (nothing is mapped to colour, fill, shape or line type)."))
-      g
-    })
-    output[[paste0(prefix, "_legend_text")]] <- renderText({
-      p <- plot_fn(); req(!is.null(p))
+  legend_key_grobs <- list(); legend_plot_fns <- list(); legend_drafts <- list()
+  LEGEND_FIGURES <- c(dist = "Distributions", traj = "Trajectories", frac = "Thresholds", es = "Effect Sizes",
+                      pca = "Morphospace", clust = "Phenotype Composition", mf = "Multi-Feature Heatmap",
+                      cm = "Cell Metrics", pub = "Composite Figure")
+
+  # The "what data" sentence for one figure: what it shows, out of what.
+  legend_data_for <- function(prefix) {
+    pd <- plot_data(); conds_total <- levels(pd$Condition)
+    times_total <- if (isTRUE(has_time())) fmt_time(sort(unique(pd$Time_min))) else NULL
+    df <- pd; conds_shown <- conds_total; times_shown <- times_total
+    if (prefix == "dist") {
+      sub <- tryCatch(dist_subset(), error = function(e) NULL)
+      if (!is.null(sub) && nrow(sub$df) > 0) {
+        df <- sub$df
+        conds_shown <- as.character(unique(df$Condition)); conds_shown <- conds_total[conds_total %in% conds_shown]
+        if (isTRUE(has_time())) times_shown <- fmt_time(sort(unique(df$Time_min)))
+      }
+    } else if (prefix == "es") {
+      ref <- input$ref_condition %||% conds_total[1]
+      conds_shown <- conds_total   # the reference is in the comparison even when not drawn
+    }
+    reps <- tryCatch({
+      rs <- rep_summ(); rs <- rs[as.character(rs$Condition) %in% conds_shown, , drop = FALSE]
+      if (isTRUE(has_time()) && !is.null(times_shown)) rs <- rs[fmt_time(rs$Time_min) %in% times_shown, , drop = FALSE]
+      cnt <- table(paste(rs$Condition, rs$Time_min)); if (length(cnt)) range(as.integer(cnt)) else NULL
+    }, error = function(e) NULL)
+    legend_data_sentence(n_cells = nrow(df), conds_shown = conds_shown, conds_total = conds_total,
+                         times_shown = times_shown, times_total = times_total, reps_range = reps,
+                         source = data_source_name(), version = APP_VERSION, date = format(Sys.Date()))
+  }
+
+  legend_draft_for <- function(prefix) {
+    p <- legend_plot_fns[[prefix]](); req(!is.null(p))
       m <- input$measure; tr <- input$data_transform %||% "none"
       u <- measure_unit_now()
       # Thresholds work on raw values whatever the transform; everything else
@@ -3686,8 +3814,43 @@ server <- function(input, output, session) {
       }
       txt <- legend_draft_text(p, measurement = meas, cvd = cvd_label(input$cvd_preview))
       if (!is.null(extra)) txt <- paste(txt, extra)
+      # Description of the figure type, then what data it shows.
+      type <- switch(prefix, dist = input$dist_type, cm = input$cm_chart_type, es = input$es_type, NULL)
+      desc <- plot_description(prefix, type)
+      data_txt <- tryCatch(legend_data_for(prefix), error = function(e) NULL)
+      txt <- paste(c(desc, txt, data_txt), collapse = " ")
       if (!nzchar(txt)) "This figure maps nothing to colour, fill, shape or line type." else txt
+  }
+
+  register_legend_key <- function(prefix, plot_fn) {
+    legend_plot_fns[[prefix]] <<- plot_fn
+    key_grob <- reactive({
+      p <- plot_fn(); req(!is.null(p))
+      g <- extract_legend_grob(legend_key_plot(p, inside = FALSE))
+      validate(need(!is.null(g), "This figure has no legend to key (nothing is mapped to colour, fill, shape or line type)."))
+      g
     })
+    legend_key_grobs[[prefix]] <<- key_grob
+    output[[paste0(prefix, "_legend_text")]] <- renderText({ legend_draft_for(prefix) })
+    # Legend tab: the same key and the same draft, so the two can never differ.
+    output[[paste0("legend_tab_key_", prefix)]] <- renderPlot({
+      p <- tryCatch(plot_fn(), error = function(e) NULL)
+      validate(need(!is.null(p), paste0("Not available until this figure has been generated on its own tab",
+                                         if (prefix == "mf") " (run the Multi-Feature analysis)" else "", ".")))
+      g <- extract_legend_grob(legend_key_plot(p, inside = FALSE))
+      validate(need(!is.null(g), "This figure has no legend to key."))
+      grid::grid.newpage(); grid::grid.draw(g)
+    }, bg = "white")
+    output[[paste0("legend_tab_text_", prefix)]] <- renderText({
+      txt <- tryCatch(legend_draft_for(prefix), error = function(e) NULL)
+      if (is.null(txt)) "Not available until this figure has been generated on its own tab." else txt
+    })
+    output[[paste0("dl_legend_tab_key_", prefix)]] <- downloadHandler(
+      filename = function() paste0("legend_key_", prefix, "_", input$measure %||% "figure", ".", fmt_ext(input$legend_tab_format %||% "pdf")),
+      content = function(file) {
+        g <- key_grob(); sz <- legend_key_size(g)
+        save_figure(file, g, sz$w, sz$h, 300, input$legend_tab_format %||% "pdf")
+      })
     output[[paste0("dl_", prefix, "_legend_key")]] <- downloadHandler(
       filename = function() paste0("legend_key_", prefix, "_", input$measure %||% "figure", ".", fmt_ext(input[[paste0(prefix, "_format")]] %||% "pdf")),
       content = function(file) {
@@ -3697,6 +3860,76 @@ server <- function(input, output, session) {
                     transparent = isTRUE(input[[paste0(prefix, "_transparent")]]))
       })
   }
+
+  # --- Legend tab: every draft in one text file -------------------------------
+  all_legend_drafts <- function() {
+    out <- character(0)
+    for (pf in names(LEGEND_FIGURES)) {
+      txt <- tryCatch(legend_draft_for(pf), error = function(e) NULL)
+      if (!is.null(txt) && nzchar(txt)) out <- c(out, paste0("== ", LEGEND_FIGURES[[pf]], " ==", "\n", txt, "\n"))
+    }
+    out
+  }
+  output$dl_all_legend_drafts <- downloadHandler(
+    filename = function() paste0("legend_drafts_", input$measure %||% "figures", "_", format(Sys.Date()), ".txt"),
+    content = function(file) writeLines(c(paste0("CellMorphR ", APP_VERSION, " legend drafts, ", format(Sys.time()), "\n"), all_legend_drafts()), file, useBytes = TRUE))
+
+  # --- Report workbook: every table the app computes, one .xlsx -----------------
+  as_sheet <- function(expr, empty_msg = "Not computed") {
+    d <- tryCatch(expr, error = function(e) NULL)
+    if (is.null(d) || !is.data.frame(d) || nrow(d) == 0) return(data.frame(Note = empty_msg, stringsAsFactors = FALSE))
+    d <- as.data.frame(d)
+    d[] <- lapply(d, function(v) if (is.factor(v)) as.character(v) else v)
+    d
+  }
+  report_sheets <- function() {
+    req(raw_data(), measure_cols())
+    df <- transformed_data(); mc <- measure_cols(); pd <- plot_data()
+    units <- vapply(mc, function(m) { u <- measure_units[[m]]; if (is.null(u)) "" else u }, character(1))
+    reps <- tryCatch({ rs <- rep_summ(); cnt <- table(paste(rs$Condition, rs$Time_min)); paste(range(as.integer(cnt)), collapse = "-") }, error = function(e) "")
+    readme <- data.frame(Field = c("App version", "Generated", "Source", "Cells (rows)", "Conditions", "Timepoints",
+                                   "Biological replicates per group", "Transform", "Current measurement", "Units",
+                                   "Reference condition", "Pairwise test", "P-value correction", "Comparison mode", "Statistical unit"),
+                         Value = c(APP_VERSION, format(Sys.time()), data_source_name(), nrow(pd), paste(levels(pd$Condition), collapse = ", "),
+                                   if (isTRUE(has_time())) paste(fmt_time(sort(unique(pd$Time_min))), collapse = ", ") else "none (single snapshot)",
+                                   reps, input$data_transform %||% "none", input$measure %||% "",
+                                   paste(paste0(mc, ": ", ifelse(nzchar(units), units, "-")), collapse = "; "),
+                                   input$ref_condition %||% "", input$stat_test %||% "welch", input$stat_p_adjust %||% "holm",
+                                   input$stat_compare_mode %||% "within_time", input$stat_summary %||% "median_val"),
+                         stringsAsFactors = FALSE)
+    cell_metrics <- as_sheet(do.call(rbind, lapply(mc, function(m) cbind(Measurement = m, as.data.frame(compute_cell_metrics(df, m))))))
+    rep_summ_all <- as_sheet(do.call(rbind, lapply(mc, function(m) cbind(Measurement = m, as.data.frame(compute_replicate_summaries(df, m))))))
+    cond_summ_all <- as_sheet(do.call(rbind, lapply(mc, function(m) cbind(Measurement = m, as.data.frame(compute_condition_summaries(compute_replicate_summaries(df, m)))))))
+    drafts <- all_legend_drafts()
+    legend_df <- if (length(drafts)) data.frame(Figure = sub("^== (.*) ==\n.*$", "\\1", drafts), Legend = sub("^== .* ==\n", "", drafts), stringsAsFactors = FALSE) else NULL
+    list(
+      "README"               = readme,
+      "Cell_metrics"         = cell_metrics,
+      "Replicate_summaries"  = rep_summ_all,
+      "Condition_summaries"  = cond_summ_all,
+      "Pairwise_stats"       = as_sheet(stat_results()$pairwise, "Not computed: run the Statistics tab first"),
+      "Thresholds"           = as_sheet(frac_table_data(), "Not computed: open the Thresholds tab first"),
+      "Power_plan"           = as_sheet(power_plan(), "Not computed"),
+      "Colour_map"           = as_sheet(colour_table()),
+      "Legend_drafts"        = as_sheet(legend_df, "No figure generated yet")
+    )
+  }
+  report_download <- function(file) {
+    if (!has_writexl) {
+      showNotification("The report workbook needs the 'writexl' package; writing the cell metrics CSV instead.", type = "warning", duration = 8)
+      return(write.csv(as_sheet(do.call(rbind, lapply(measure_cols(), function(m) cbind(Measurement = m, as.data.frame(compute_cell_metrics(transformed_data(), m)))))), file, row.names = FALSE))
+    }
+    writexl::write_xlsx(report_sheets(), path = file)
+  }
+  output$dl_report_xlsx <- downloadHandler(
+    filename = function() paste0("CellMorphR_report_", format(Sys.Date()), if (has_writexl) ".xlsx" else ".csv"),
+    content = report_download)
+  output$dl_report_xlsx_legend <- downloadHandler(
+    filename = function() paste0("CellMorphR_report_", format(Sys.Date()), if (has_writexl) ".xlsx" else ".csv"),
+    content = report_download)
+  output$dl_report_xlsx_cm <- downloadHandler(
+    filename = function() paste0("CellMorphR_report_", format(Sys.Date()), if (has_writexl) ".xlsx" else ".csv"),
+    content = report_download)
 
   # --- Figure settings: collect / apply (Save Session and the .json style file) ---
   # Every static figure-control input of every tab: typography, labels,
@@ -4142,7 +4375,12 @@ server <- function(input, output, session) {
   # column holding each file's name without its extension; the usual column
   # mapping then lets the user assign it to Condition or Replicate. Nothing is
   # inferred from the file names themselves.
+  # Where the data came from, for legends and the report: file name(s), the
+  # demo, or the session that restored it.
+  data_source_name <- reactiveVal("")
+
   load_data_file <- function(filepath, filename) {
+    data_source_name(paste(basename(filename), collapse = ", "))
     tables <- Map(read_one_table, filepath, filename)
     ok <- !vapply(tables, function(t) is.null(t) || nrow(t) == 0, logical(1))
     if (!any(ok)) {
@@ -4269,6 +4507,7 @@ server <- function(input, output, session) {
         Circularity = round(runif(n_cells, 0.6, 1.0), 3))
     }
     df <- bind_rows(rows); df$Replicate <- as.factor(df$Replicate)
+    data_source_name("built-in demo data")
     raw_data(df); measure_cols(c("Area", "Perimeter", "Circularity"))
     showNotification("Demo data loaded.", type = "message")
   }
@@ -4290,7 +4529,8 @@ server <- function(input, output, session) {
           data_transform = input$data_transform,
           measure_units = reactiveValuesToList(measure_units),
           figure = collect_figure_settings(),
-          colour_map = as.list(cond_colors_raw())
+          colour_map = as.list(cond_colors_raw()),
+          data_source = data_source_name()
         ),
         app_version = APP_VERSION,
         saved_at = Sys.time()
@@ -4315,7 +4555,8 @@ server <- function(input, output, session) {
       # The text box only follows input$measure when that CHANGES; refresh it
       # here too so a restored session shows its unit even for the same measure.
       m_now <- s$measure %||% input$measure
-      if (!is.null(m_now)) updateTextInput(session, "measure_unit", value = s$measure_units[[m_now]] %||% "")
+      if (!is.null(m_now)) { u <- s$measure_units[[m_now]] %||% ""
+        updateSelectizeInput(session, "measure_unit", choices = union(UNIT_CHOICES, u), selected = u) }
     }
     if (is.list(s$figure)) apply_figure_settings(s$figure)
     if (is.list(s$colour_map) && length(s$colour_map) > 0) {
@@ -4337,6 +4578,7 @@ server <- function(input, output, session) {
     df$Time_min  <- as.numeric(df$Time_min)
     df$Replicate <- as.factor(df$Replicate)
     pending_session_settings(sess$settings)
+    data_source_name(sess$settings$data_source %||% paste0("session file ", basename(input$load_session$name)))
     raw_data(df); measure_cols(sess$measure_cols)
 
     saved_time <- if (!is.null(sess$saved_at)) format(sess$saved_at, "%Y-%m-%d %H:%M") else "unknown"
@@ -4584,8 +4826,9 @@ server <- function(input, output, session) {
   measure_units <- reactiveValues()
   observeEvent(input$measure, {
     req(input$measure)
-    updateTextInput(session, "measure_unit",
-                    value = isolate(measure_units[[input$measure]]) %||% "")
+    u <- isolate(measure_units[[input$measure]]) %||% ""
+    # A unit typed by the user is not in the preset list; add it or the select drops it.
+    updateSelectizeInput(session, "measure_unit", choices = union(UNIT_CHOICES, u), selected = u)
   })
   observeEvent(input$measure_unit, {
     req(input$measure)
