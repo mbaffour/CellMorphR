@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.5.0
+# Version 3.6.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.5.0.
+#   anti-pseudoreplication statistics. Version 3.6.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.5.0"
+APP_VERSION <- "3.6.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -702,6 +702,54 @@ legend_grob_labels <- function(g) {
     if (!is.null(x$children)) for (ch in x$children) walk(ch)
   }
   walk(g); unique(out[nzchar(out)])
+}
+
+# =============================================================================
+# SAMPLE COLOUR MAP (3.6.0)
+# The condition -> hex table the Data tab shows and exports, and the reader for
+# a map coming back in (from this or another dataset). Transfer rule: a row
+# whose Sample matches a current condition by name sets that condition; the
+# remaining rows are then applied IN ORDER to the conditions that were not
+# matched, so a map from a differently named experiment still carries its
+# colours across.
+# =============================================================================
+normalise_hex <- function(x) {
+  x <- trimws(as.character(x))
+  vapply(x, function(v) {
+    if (is.na(v) || !nzchar(v)) return(NA_character_)
+    if (grepl("^#?[0-9A-Fa-f]{6}$", v)) return(toupper(paste0("#", sub("^#", "", v))))
+    if (grepl("^#?[0-9A-Fa-f]{3}$", v)) { h <- strsplit(sub("^#", "", v), "")[[1]]; return(toupper(paste0("#", paste0(rep(h, each = 2), collapse = "")))) }
+    rgbv <- tryCatch(grDevices::col2rgb(v), error = function(e) NULL)
+    if (is.null(rgbv)) return(NA_character_)
+    toupper(grDevices::rgb(rgbv[1], rgbv[2], rgbv[3], maxColorValue = 255))
+  }, character(1), USE.NAMES = FALSE)
+}
+
+parse_colour_map <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(data.frame(Sample = character(), Hex = character(), stringsAsFactors = FALSE))
+  nms <- tolower(trimws(names(df)))
+  s_col <- which(nms %in% c("sample", "condition", "group", "treatment", "name", "label"))[1]
+  h_col <- which(nms %in% c("hex", "colour", "color", "hex_code", "hexcode", "value"))[1]
+  if (is.na(s_col)) s_col <- 1L
+  if (is.na(h_col)) h_col <- if (ncol(df) >= 2) 2L else NA_integer_
+  if (is.na(h_col)) return(data.frame(Sample = character(), Hex = character(), stringsAsFactors = FALSE))
+  out <- data.frame(Sample = trimws(as.character(df[[s_col]])), Hex = normalise_hex(df[[h_col]]), stringsAsFactors = FALSE)
+  out[!is.na(out$Hex) & nzchar(out$Sample), , drop = FALSE]
+}
+
+assign_colour_map <- function(conds, map, current = NULL) {
+  conds <- as.character(conds)
+  out <- setNames(rep(NA_character_, length(conds)), conds)
+  if (!is.null(current)) out[names(current)[names(current) %in% conds]] <- unname(current[names(current) %in% conds])
+  if (is.null(map) || nrow(map) == 0) return(out)
+  by_name <- map$Hex[match(conds, map$Sample)]
+  matched <- !is.na(by_name)
+  out[matched] <- by_name[matched]
+  leftover <- map$Hex[!map$Sample %in% conds]
+  unmatched <- which(!matched)
+  k <- min(length(leftover), length(unmatched))
+  if (k > 0) out[unmatched[seq_len(k)]] <- leftover[seq_len(k)]
+  list(colours = out, matched_by_name = sum(matched), matched_by_order = k)
 }
 
 
@@ -2519,7 +2567,24 @@ ui <- page_navbar(
           value_box(title = "Biological Replicates", value = textOutput("n_reps_txt"),
                     showcase = icon("flask"), theme = "info")
         ),
-        card(card_header("Feature Diagnostics"), DTOutput("feature_diagnostics_table"))
+        card(card_header("Feature Diagnostics"), DTOutput("feature_diagnostics_table")),
+        card(card_header("Sample Colours (hex codes)"),
+          tags$p(class = "small text-muted mb-2",
+            "The exact colour of every sample as drawn, for pasting into another tool or carrying to another dataset. ",
+            "Loading a colour map applies rows by matching sample name first, then the remaining rows in order to the samples that did not match."),
+          layout_columns(col_widths = c(7, 5),
+            DTOutput("colour_table"),
+            tags$div(
+              tags$label("Copy-ready", class = "small fw-bold"),
+              verbatimTextOutput("colour_text", placeholder = TRUE),
+              downloadButton("dl_colour_map", "Download Colour Map (CSV)", class = "btn-outline-primary btn-sm w-100 mt-2"),
+              fileInput("load_colour_map", NULL, accept = c(".csv", ".tsv", ".txt"),
+                        placeholder = "Load colour map (CSV: Sample, Hex)", width = "100%"),
+              tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-10px;",
+                "Columns Sample and Hex (or Condition / Colour). Hex codes or R colour names. Saved sessions keep these colours too.")
+            )
+          )
+        )
       )
     )
   ),
@@ -4155,7 +4220,8 @@ server <- function(input, output, session) {
           ref_condition = input$ref_condition,
           data_transform = input$data_transform,
           measure_units = reactiveValuesToList(measure_units),
-          figure = collect_figure_settings()
+          figure = collect_figure_settings(),
+          colour_map = as.list(cond_colors_raw())
         ),
         app_version = APP_VERSION,
         saved_at = Sys.time()
@@ -4183,6 +4249,10 @@ server <- function(input, output, session) {
       if (!is.null(m_now)) updateTextInput(session, "measure_unit", value = s$measure_units[[m_now]] %||% "")
     }
     if (is.list(s$figure)) apply_figure_settings(s$figure)
+    if (is.list(s$colour_map) && length(s$colour_map) > 0) {
+      map_df <- data.frame(Sample = names(s$colour_map), Hex = normalise_hex(unlist(s$colour_map)), stringsAsFactors = FALSE)
+      apply_colour_map(map_df[!is.na(map_df$Hex), , drop = FALSE], note = FALSE)
+    }
     pending_session_settings(NULL)
   }, ignoreInit = TRUE)
 
@@ -4510,7 +4580,11 @@ server <- function(input, output, session) {
       if (has_colourpicker)
         tagList(lapply(seq_along(conds), function(i) {
           cur <- input[[paste0("color_", i)]]
-          init <- if (!is.null(cur) && nchar(cur) > 0) cur else preset_cols[i]
+          # A colour map just loaded (or restored with a session) wins; then the
+          # picker's own value; then the preset.
+          pend <- isolate(pending_colour_map())
+          init <- if (!is.null(pend) && !is.na(pend[conds[i]] %||% NA)) unname(pend[conds[i]])
+                  else if (!is.null(cur) && nchar(cur) > 0) cur else preset_cols[i]
           colourpicker::colourInput(paste0("color_", i), conds[i], init, showColour = "both")
         }))
       else
@@ -4530,6 +4604,35 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
 
+  # Colours waiting to be applied: from a loaded colour map or a restored
+  # session. Read by the picker UI when it (re)renders and pushed to pickers
+  # that already exist.
+  pending_colour_map <- reactiveVal(NULL)
+  apply_colour_map <- function(map_df, note = TRUE) {
+    req(plot_data())
+    conds <- levels(plot_data()$Condition)
+    res <- assign_colour_map(conds, map_df, current = isolate(cond_colors_raw()))
+    cols <- res$colours
+    pending_colour_map(cols)
+    if (has_colourpicker) {
+      for (i in seq_along(conds)) if (!is.na(cols[i]))
+        colourpicker::updateColourInput(session, paste0("color_", i), value = unname(cols[i]))
+    }
+    updateSelectInput(session, "palette_preset_sel", selected = "Custom")
+    if (note) showNotification(paste0("Colour map applied: ", res$matched_by_name, " sample(s) matched by name, ",
+                                      res$matched_by_order, " by order."), type = "message", duration = 6)
+    invisible(res)
+  }
+  observeEvent(input$load_colour_map, {
+    req(input$load_colour_map)
+    df <- tryCatch(read.csv(input$load_colour_map$datapath, stringsAsFactors = FALSE, check.names = FALSE,
+                            sep = if (grepl("\\.tsv$", input$load_colour_map$name, ignore.case = TRUE)) "\t" else ","),
+                   error = function(e) NULL)
+    map_df <- parse_colour_map(df)
+    if (nrow(map_df) == 0) { showNotification("No usable rows: the file needs a Sample column and a Hex (or Colour) column.", type = "error", duration = 8); return() }
+    apply_colour_map(map_df)
+  })
+
   cond_colors <- reactive({
     req(plot_data())
     conds <- levels(plot_data()$Condition); n <- length(conds)
@@ -4548,6 +4651,29 @@ server <- function(input, output, session) {
   cond_colors <- reactive({
     simulate_cvd(cond_colors_raw(), input$cvd_preview %||% "none")
   })
+
+  # The sample -> hex table (real palette, never the colour-vision preview).
+  colour_table <- reactive({
+    cols <- cond_colors_raw()
+    data.frame(Sample = names(cols), Hex = toupper(unname(cols)), Colour_Name = colour_word(unname(cols)),
+               stringsAsFactors = FALSE)
+  })
+  output$colour_table <- renderDT({
+    d <- colour_table()
+    # The Hex cell is filled with its own colour, so it doubles as the swatch.
+    datatable(d, rownames = FALSE, options = list(dom = "t", pageLength = 50, ordering = FALSE),
+              colnames = c("Sample", "Hex", "Colour name")) %>%
+      formatStyle("Hex", target = "cell", backgroundColor = styleEqual(d$Hex, d$Hex),
+                  color = styleEqual(d$Hex, ifelse(colour_word(d$Hex) %in% c("white", "yellow", "light grey", "sky blue", "light blue", "gold"), "#000000", "#FFFFFF")),
+                  fontWeight = "bold")
+  })
+  output$colour_text <- renderText({
+    d <- colour_table()
+    paste(paste0(d$Sample, "\t", d$Hex), collapse = "\n")
+  })
+  output$dl_colour_map <- downloadHandler(
+    filename = function() paste0("colour_map_", format(Sys.Date()), ".csv"),
+    content = function(file) write.csv(colour_table(), file, row.names = FALSE))
 
   # Replicate summaries
   rep_summ <- reactive({

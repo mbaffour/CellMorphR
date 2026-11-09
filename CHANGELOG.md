@@ -4,6 +4,24 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.6.0 — 2026-11-09
+
+**Sample colours you can read, export and carry over.** The Data tab gains a
+*Sample Colours (hex codes)* card: every sample with its exact hex code (the
+chosen palette, never the colour-vision preview), a coloured swatch and a
+plain colour name; a copy-ready `Sample<TAB>Hex` box; **Download Colour Map
+(CSV)**; and **Load colour map**, which applies a CSV (`Sample, Hex`, or
+`Condition, Colour`; hex codes or R colour names) by matching sample names
+first and then the remaining rows in order to the samples that did not match,
+so a palette moves to a differently named experiment too. Loading switches the
+quick palette to Custom and reports how many samples matched by name and by
+order.
+
+- **Saved sessions now restore the per-sample colours.** They were the one
+  setting a session did not keep.
+- Helpers `normalise_hex()`, `parse_colour_map()` and `assign_colour_map()`
+  are in the statistical core and tested (`tests/testthat/test-colour-map.R`).
+
 ## 3.5.0 — 2026-11-08
 
 **Legend key on every main figure.** Each figure tab's controls gain a
