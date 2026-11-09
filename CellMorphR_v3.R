@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.8.0
+# Version 3.9.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.8.0.
+#   anti-pseudoreplication statistics. Version 3.9.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.8.0"
+APP_VERSION <- "3.9.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -48,6 +48,12 @@ has_cluster <- requireNamespace("cluster", quietly = TRUE)
 has_hexbin <- requireNamespace("hexbin", quietly = TRUE)
 has_officer <- requireNamespace("officer", quietly = TRUE)
 has_rvg <- requireNamespace("rvg", quietly = TRUE)
+# capabilities("cairo") can be TRUE while the cairo library fails to load (macOS
+# without XQuartz). Probe by opening and closing a cairo device on a temp file,
+# which draws nothing, so a failure cannot leave an Rplots.pdf behind.
+has_cairo <- isTRUE(capabilities("cairo")) && tryCatch({
+  f <- tempfile(fileext = ".pdf"); suppressWarnings(grDevices::cairo_pdf(f)); grDevices::dev.off(); unlink(f); TRUE
+}, error = function(e) FALSE, warning = function(w) FALSE)
 
 # =============================================================================
 # PUBLICATION GGPLOT THEME (parameterized)
@@ -2151,9 +2157,6 @@ figure_controls_ui <- function(prefix, def_width = 8, def_height = 5, show_legen
     numericInput(paste0(prefix, "_height"), "Height (in)", def_height, 1, 20, 0.1),
     numericInput(paste0(prefix, "_dpi"), "DPI", 300, 72, 600, 50),
     checkboxInput(paste0(prefix, "_transparent"), "Transparent background (PNG/PDF/SVG)", FALSE),
-    selectInput(paste0(prefix, "_format"), "File format",
-      choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg", "TIFF" = "tiff", "EPS" = "eps",
-                  "PPTX (editable)" = "pptx"), selected = "pdf"),
     tags$hr(),
     # --- Legend key: the figure's own legend, standalone or on the figure ---
     tags$p(tags$strong("Legend Key"), class = "mb-1"),
@@ -2165,9 +2168,34 @@ figure_controls_ui <- function(prefix, def_width = 8, def_height = 5, show_legen
     verbatimTextOutput(paste0(prefix, "_legend_text"), placeholder = TRUE),
     downloadButton(paste0("dl_", prefix, "_legend_key"), "Download Legend Key", class = "btn-outline-primary w-100 mt-1"),
     tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
-      "The key is this figure's own legend -- same colours, shapes, fills, names and font -- exported alone in the file format above. The draft adds the measurement and the figure's own subtitle and caption (statistic, N, error measure, test), so it states exactly what is drawn. Both follow the figure live.")
+      "The key is this figure's own legend -- same colours, shapes, fills, names and font -- exported alone in the file format chosen by the Download button. The draft adds the measurement and the figure's own subtitle and caption (statistic, N, error measure, test), so it states exactly what is drawn. Both follow the figure live."),
+    # --- Batch export: this figure for several measurements and formats at once ---
+    if (prefix %in% c("dist", "traj", "frac", "es", "pub")) tagList(
+      tags$hr(),
+      tags$p(tags$strong("Batch Export"), class = "mb-1"),
+      tags$p(class = "small text-muted", style = "font-size:10px;",
+        "This figure, with every edit above applied, for each ticked measurement in each ticked format, as one ZIP."),
+      uiOutput(paste0(prefix, "_batch_ui")),
+      downloadButton(paste0("dl_", prefix, "_batch"), "Download Batch (ZIP)", class = "btn-outline-primary w-100 mt-1")
+    ) else NULL
   )
   controls
+}
+
+FIGURE_FORMAT_CHOICES <- c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg", "TIFF" = "tiff", "EPS" = "eps",
+                           "PPTX (editable)" = "pptx")
+
+# The download row every figure tab ends with: the file-format choice sits
+# right beside the button, so it cannot be missed at the bottom of a long
+# sidebar. The same <prefix>_format input feeds the legend key export too.
+download_row_ui <- function(prefix, id, label = "Download Figure") {
+  tagList(
+    layout_columns(col_widths = c(5, 7), gap = "6px",
+      selectInput(paste0(prefix, "_format"), NULL, choices = FIGURE_FORMAT_CHOICES, selected = "pdf"),
+      downloadButton(id, label, class = "btn-primary w-100")),
+    tags$p(class = "small text-muted", style = "font-size:10px; margin-top:-10px;",
+      "Choose the file format, then download. Size and resolution are in Export Settings above.")
+  )
 }
 
 # Helper: get theme from shared controls
@@ -2805,7 +2833,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("dist", 8, 5.5),
         tags$hr(),
-        downloadButton("dl_dist", "Download Figure", class = "btn-primary w-100"),
+        download_row_ui("dist", "dl_dist"),
         downloadButton("dl_dist_data", "Download Plot Data (CSV)", class = "btn-outline-secondary w-100 mt-2"),
         tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
           "The per-replicate medians and means behind the figure, for replotting elsewhere.")
@@ -2880,7 +2908,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("traj", 7, 5),
         tags$hr(),
-        downloadButton("dl_traj", "Download Figure", class = "btn-primary w-100"),
+        download_row_ui("traj", "dl_traj"),
         downloadButton("dl_traj_data", "Download Plot Data (CSV)", class = "btn-outline-secondary w-100 mt-2"),
         tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
           "Replicate summaries plus the group mean, SD, SEM and 95% CI drawn here, for replotting elsewhere.")
@@ -2946,7 +2974,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("frac", 8, 5),
         tags$hr(),
-        downloadButton("dl_frac", "Download Figure", class = "btn-primary w-100"),
+        download_row_ui("frac", "dl_frac"),
         downloadButton("dl_frac_data", "Download Table (CSV)", class = "btn-outline-secondary w-100 mt-2")
       ),
       navset_card_tab(
@@ -2992,7 +3020,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("pca", 8, 7),
         tags$hr(),
-        downloadButton("dl_pca", "Download Morphospace", class = "btn-primary w-100"),
+        download_row_ui("pca", "dl_pca", "Download Morphospace"),
         downloadButton("dl_pca_traj", "Download Trajectory", class = "btn-outline-primary w-100 mt-2")
       ),
       navset_card_tab(
@@ -3056,7 +3084,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("clust", 10, 5),
         tags$hr(),
-        downloadButton("dl_clust", "Download Figure", class = "btn-primary w-100")
+        download_row_ui("clust", "dl_clust")
       ),
       navset_card_tab(
         nav_panel("Clusters",
@@ -3261,7 +3289,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("es", 7, 4.5),
         tags$hr(),
-        downloadButton("dl_es", "Download Figure", class = "btn-primary w-100")
+        download_row_ui("es", "dl_es")
       ),
       navset_card_tab(
         nav_panel("Plot",
@@ -3321,7 +3349,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("mf", 8, 6),
         tags$hr(),
-        downloadButton("dl_mf_heatmap", "Download Heatmap", class = "btn-primary w-100"),
+        download_row_ui("mf", "dl_mf_heatmap", "Download Heatmap"),
         downloadButton("dl_mf_raw_heatmap", "Download Raw Heatmap", class = "btn-outline-primary w-100 mt-2"),
         downloadButton("dl_mf_radar", "Download Radar Plot", class = "btn-outline-primary w-100 mt-2"),
         downloadButton("dl_mf_table", "Download Results (CSV)", class = "btn-outline-primary w-100 mt-2")
@@ -3420,7 +3448,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("cm", 8, 5),
         tags$hr(),
-        downloadButton("dl_cm_plot", "Download Figure", class = "btn-primary w-100"),
+        download_row_ui("cm", "dl_cm_plot"),
         downloadButton("dl_cm_table", "Download Table (CSV)", class = "btn-outline-primary w-100 mt-2"),
         downloadButton("dl_report_xlsx_cm", "Download Report Workbook (.xlsx)", class = "btn-outline-secondary w-100 mt-2"),
         tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
@@ -3455,7 +3483,7 @@ ui <- page_navbar(
         tags$hr(),
         figure_controls_ui("pub", 12, 5, show_legend = FALSE),
         tags$hr(),
-        downloadButton("dl_pub", "Download Figure", class = "btn-primary w-100"),
+        download_row_ui("pub", "dl_pub"),
         downloadButton("dl_pub_deck", "Export Panels to PPTX Deck", class = "btn-outline-primary w-100 mt-2"),
         tags$p(class = "small text-muted mt-1",
           "PPTX deck: one editable vector slide per panel (requires officer + rvg).")
@@ -3747,6 +3775,50 @@ server <- function(input, output, session) {
     }, deleteFile = TRUE)
   }
 
+  # --- Batch export: one figure, several measurements x several formats, one ZIP ---
+  register_batch_export <- function(prefix, plot_fn, base_name) {
+    output[[paste0(prefix, "_batch_ui")]] <- renderUI({
+      req(measure_cols())
+      tagList(
+        checkboxGroupInput(paste0(prefix, "_batch_measures"), "Measurements", choices = measure_cols(),
+                           selected = isolate(input$measure) %||% measure_cols()[1]),
+        checkboxGroupInput(paste0(prefix, "_batch_formats"), "Formats", choices = FIGURE_FORMAT_CHOICES,
+                           selected = isolate(input[[paste0(prefix, "_format")]]) %||% "pdf", inline = TRUE)
+      )
+    })
+    output[[paste0("dl_", prefix, "_batch")]] <- downloadHandler(
+      filename = function() paste0(base_name, "_batch_", format(Sys.Date()), ".zip"),
+      content = function(file) {
+        ms   <- input[[paste0(prefix, "_batch_measures")]] %||% input$measure
+        fmts <- input[[paste0(prefix, "_batch_formats")]] %||% (input[[paste0(prefix, "_format")]] %||% "pdf")
+        validate(need(length(ms) > 0 && length(fmts) > 0, "Tick at least one measurement and one format."))
+        w <- input[[paste0(prefix, "_width")]] %||% 8; h <- input[[paste0(prefix, "_height")]] %||% 5
+        dpi <- input[[paste0(prefix, "_dpi")]] %||% 300; tr <- isTRUE(input[[paste0(prefix, "_transparent")]])
+        dir <- tempfile("batch_"); dir.create(dir)
+        on.exit(batch_measure(NULL), add = TRUE)
+        written <- character(0)
+        withProgress(message = "Exporting figures", value = 0, {
+          total <- length(ms) * length(fmts)
+          for (m in ms) {
+            batch_measure(m)                       # every figure reactive reads current_measure()
+            p <- tryCatch(plot_fn(), error = function(e) NULL)
+            for (fmt in fmts) {
+              incProgress(1 / total, detail = paste(m, fmt))
+              if (is.null(p)) next
+              f <- file.path(dir, paste0(base_name, "_", gsub("[^A-Za-z0-9_.-]+", "_", m), ".", fmt_ext(fmt)))
+              ok <- tryCatch({ save_figure(f, p, w, h, dpi, fmt, transparent = tr); file.exists(f) }, error = function(e) FALSE)
+              if (isTRUE(ok)) written <- c(written, f)
+            }
+          }
+        })
+        batch_measure(NULL)
+        validate(need(length(written) > 0, "Nothing could be exported for those choices."))
+        if (requireNamespace("zip", quietly = TRUE)) zip::zip(file, files = basename(written), root = dir, mode = "cherry-pick")
+        else { od <- setwd(dir); on.exit(setwd(od), add = TRUE); utils::zip(file, files = basename(written), flags = "-q") }
+        showNotification(paste0("Batch export: ", length(written), " file(s) for ", length(ms), " measurement(s)."), type = "message", duration = 6)
+      })
+  }
+
   # --- Legend key per figure ----------------------------------------------------
   # Everything is derived from the live plot reactive, so renamed conditions,
   # changed colours or a different sample selection show up at once.
@@ -3783,7 +3855,7 @@ server <- function(input, output, session) {
 
   legend_draft_for <- function(prefix) {
     p <- legend_plot_fns[[prefix]](); req(!is.null(p))
-      m <- input$measure; tr <- input$data_transform %||% "none"
+      m <- current_measure(); tr <- input$data_transform %||% "none"
       u <- measure_unit_now()
       # Thresholds work on raw values whatever the transform; everything else
       # draws the transformed measurement.
@@ -4002,12 +4074,28 @@ server <- function(input, output, session) {
       ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "tiff",
              compression = "lzw", bg = bg)
     } else if (format == "eps") {
-      if (isTRUE(capabilities("cairo"))) {
-        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = cairo_ps, bg = bg)
-      } else {
-        showNotification("Cairo is unavailable on this R build; using the standard postscript device (fonts are not embedded).",
+      # capabilities("cairo") can be TRUE while the cairo library fails to load
+      # (macOS without XQuartz), in which case ggsave writes nothing and only
+      # warns. Try cairo, check the file, and fall back to plain postscript.
+      ok <- FALSE
+      if (has_cairo) {
+        ok <- tryCatch({
+          suppressWarnings(ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = cairo_ps, bg = bg))
+          file.exists(file) && file.size(file) > 0
+        }, error = function(e) FALSE)
+      }
+      if (!ok) {
+        showNotification("Cairo is unavailable on this R build; using the standard postscript device (fonts are not embedded; semi-transparent fills are drawn opaque).",
                          type = "warning", duration = 8)
-        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "eps", bg = bg)
+        # The theme uses the generic families sans / serif / mono, which the
+        # postscript device does not know by name: alias them once.
+        pf <- grDevices::postscriptFonts()
+        if (!"sans" %in% names(pf))  grDevices::postscriptFonts(sans  = pf$Helvetica)
+        if (!"serif" %in% names(pf)) grDevices::postscriptFonts(serif = pf$Times)
+        if (!"mono" %in% names(pf))  grDevices::postscriptFonts(mono  = pf$Courier)
+        # ...and the device must be told which families to include.
+        ggsave(file, plot_obj, width = width, height = height, dpi = dpi, device = "eps", bg = bg,
+               fonts = c("sans", "serif", "mono"))
       }
     } else if (format == "pptx") {
       if (has_officer && has_rvg) {
@@ -4821,6 +4909,12 @@ server <- function(input, output, session) {
     apply_transform_to_columns(df, mc, transform)
   })
 
+  # The measurement the figures draw. Normally the Data-tab selection; during a
+  # batch export it is overridden one measurement at a time, so every figure
+  # reactive below reads current_measure(), never input$measure directly.
+  batch_measure <- reactiveVal(NULL)
+  current_measure <- reactive({ batch_measure() %||% input$measure })
+
   # Units are remembered PER measurement (Area -> um^2, Circularity -> nothing),
   # so switching the measurement never carries the wrong unit onto an axis.
   measure_units <- reactiveValues()
@@ -4835,7 +4929,7 @@ server <- function(input, output, session) {
     measure_units[[input$measure]] <- trimws(input$measure_unit %||% "")
   })
   measure_unit_now <- reactive({
-    m <- input$measure
+    m <- current_measure()
     if (is.null(m)) return("")
     u <- measure_units[[m]]
     if (is.null(u)) "" else trimws(u)
@@ -4843,14 +4937,14 @@ server <- function(input, output, session) {
 
   # Name of the measurement as it reads in a TITLE: transform shown, no unit.
   measure_title <- reactive({
-    m <- input$measure; tr <- input$data_transform %||% "none"
+    m <- current_measure(); tr <- input$data_transform %||% "none"
     if (tr == "log") paste0("log(", m, ")") else if (tr == "sqrt") paste0("sqrt(", m, ")") else m
   })
   # Name of the measurement as it reads on an AXIS: with its unit when one is
   # set. A transformed axis is no longer in the raw unit, so the unit moves
   # inside the transform -- "log(Area [um^2])", never "log(Area) (um^2)".
   measure_label <- reactive({
-    m <- input$measure; tr <- input$data_transform %||% "none"
+    m <- current_measure(); tr <- input$data_transform %||% "none"
     u <- measure_unit_now()
     if (!nzchar(u)) return(measure_title())
     if (tr == "log") paste0("log(", m, " [", u, "])")
@@ -4989,9 +5083,9 @@ server <- function(input, output, session) {
 
   # Replicate summaries
   rep_summ <- reactive({
-    req(transformed_data(), input$measure)
+    req(transformed_data(), current_measure())
     df <- transformed_data()
-    m  <- input$measure
+    m  <- current_measure()
     if (!m %in% names(df)) return(NULL)
     df$Time_min <- suppressWarnings(as.numeric(df$Time_min))
     tryCatch(compute_replicate_summaries(df, m), error = function(e) NULL)
@@ -5038,7 +5132,7 @@ server <- function(input, output, session) {
   # The sample / timepoint filters, shared by the figure and its data export so
   # the CSV always holds exactly the replicate summaries the figure drew.
   dist_subset <- reactive({
-    req(transformed_data(), input$measure)
+    req(transformed_data(), current_measure())
     df <- transformed_data(); rs <- rep_summ()
 
     # ── Apply sample filter (checkboxes) ────────────────────────────────────
@@ -5066,8 +5160,8 @@ server <- function(input, output, session) {
   })
 
   dist_plot_obj <- reactive({
-    req(transformed_data(), input$measure, input$dist_type)
-    m <- input$measure; cols <- cond_colors()
+    req(transformed_data(), current_measure(), input$dist_type)
+    m <- current_measure(); cols <- cond_colors()
     mlbl <- measure_label(); mttl <- measure_title()
     sub <- dist_subset(); df <- sub$df; rs <- sub$rs
 
@@ -5753,6 +5847,7 @@ server <- function(input, output, session) {
 
   output$dist_plot <- renderPlot({ dist_plot_obj() })
   register_legend_key("dist", dist_plot_obj)
+  register_batch_export("dist", dist_plot_obj, "distributions")
   register_sized_plot("dist_plot", "dist", dist_plot_obj, "600px")
   output$dl_dist <- downloadHandler(
     filename = function() paste0("distributions_", input$measure, ".", fmt_ext(input$dist_format)),
@@ -5798,7 +5893,7 @@ server <- function(input, output, session) {
     validate(need(nrow(rs) > 0 && nrow(cs) > 0,
       "Every replicate was dropped: none has a measurement at the earliest timepoint to normalise to."))
     mlbl <- measure_label(); mttl <- measure_title()
-    if (isTRUE(td$on_raw)) { mlbl <- paste0(input$measure, if (nzchar(measure_unit_now())) paste0(" (", measure_unit_now(), ")") else ""); mttl <- input$measure }
+    if (isTRUE(td$on_raw)) { mlbl <- paste0(current_measure(), if (nzchar(measure_unit_now())) paste0(" (", measure_unit_now(), ")") else ""); mttl <- current_measure() }
     stat_word <- if (yvar == "median_val") "medians" else "means"
     stat_sing <- sub("s$", "", stat_word)
     norm_mode <- td$mode
@@ -5877,7 +5972,7 @@ server <- function(input, output, session) {
   # raw, or normalised to each replicate's own baseline. Shared by the figure
   # and its CSV so the two can never disagree.
   traj_data <- reactive({
-    req(rep_summ(), input$traj_summary, input$measure)
+    req(rep_summ(), input$traj_summary, current_measure())
     yvar <- input$traj_summary
     mode <- if (isTRUE(has_time())) (input$traj_normalise %||% "none") else "none"
     # Normalisation is a statement about the measurement, not its transform: a
@@ -5886,7 +5981,7 @@ server <- function(input, output, session) {
     # tab's transform is set to, and the subtitle says so.
     transform_active <- (input$data_transform %||% "none") != "none"
     src <- if (mode != "none" && transform_active) {
-      m <- input$measure; df <- plot_data(); req(m %in% names(df))
+      m <- current_measure(); df <- plot_data(); req(m %in% names(df))
       df$Time_min <- suppressWarnings(as.numeric(df$Time_min))
       tryCatch(compute_replicate_summaries(df, m), error = function(e) NULL)
     } else rep_summ()
@@ -5902,6 +5997,7 @@ server <- function(input, output, session) {
 
   output$traj_plot <- renderPlot({ traj_plot_obj() })
   register_legend_key("traj", traj_plot_obj)
+  register_batch_export("traj", traj_plot_obj, "trajectory")
   register_sized_plot("traj_plot", "traj", traj_plot_obj, "550px")
   output$dl_traj <- downloadHandler(
     filename = function() paste0("trajectory_", input$measure, ".", fmt_ext(input$traj_format)),
@@ -5925,8 +6021,8 @@ server <- function(input, output, session) {
 
   # === THRESHOLDS TAB ===
   frac_threshold <- reactive({
-    req(plot_data(), input$measure)
-    df <- plot_data(); m <- input$measure
+    req(plot_data(), current_measure())
+    df <- plot_data(); m <- current_measure()
     req(m %in% names(df))
     mode <- input$frac_mode %||% "multiple"
     val  <- if (mode == "absolute") input$frac_absolute else (input$frac_multiple %||% 2)
@@ -5934,7 +6030,7 @@ server <- function(input, output, session) {
     threshold_value(df, m, mode, val, input$ref_condition)
   })
   frac_summ <- reactive({
-    thr <- frac_threshold(); df <- plot_data(); m <- input$measure
+    thr <- frac_threshold(); df <- plot_data(); m <- current_measure()
     validate(need(is.finite(thr$threshold), "The threshold could not be computed (no reference cells at the baseline timepoint)."))
     compute_fraction_summaries(df, m, thr$threshold, input$frac_direction %||% "above")
   })
@@ -5943,7 +6039,7 @@ server <- function(input, output, session) {
     compute_condition_summaries(rs)
   })
   output$frac_threshold_txt <- renderUI({
-    thr <- frac_threshold(); m <- input$measure
+    thr <- frac_threshold(); m <- current_measure()
     basis <- if (thr$mode == "absolute") "set directly"
       else paste0(thr$multiple, " x the pooled median of ", thr$ref,
                   if (isTRUE(has_time())) paste0(" at ", fmt_time(thr$t0)) else "",
@@ -5955,7 +6051,7 @@ server <- function(input, output, session) {
 
   frac_plot_obj <- reactive({
     rs <- frac_summ(); cs <- frac_cond_summ(); thr <- frac_threshold()
-    cols <- cond_colors(); m <- input$measure; dir_word <- if ((input$frac_direction %||% "above") == "above") "above" else "below"
+    cols <- cond_colors(); m <- current_measure(); dir_word <- if ((input$frac_direction %||% "above") == "above") "above" else "below"
     req(nrow(rs) > 0)
     rs$Condition <- factor(as.character(rs$Condition), levels = levels(plot_data()$Condition))
     rs$Condition <- droplevels(rs$Condition)
@@ -6062,6 +6158,7 @@ server <- function(input, output, session) {
   })
   output$frac_plot <- renderPlot({ frac_plot_obj() })
   register_legend_key("frac", frac_plot_obj)
+  register_batch_export("frac", frac_plot_obj, "threshold_fraction")
   register_sized_plot("frac_plot", "frac", frac_plot_obj, "550px")
   output$dl_frac <- downloadHandler(
     filename = function() paste0("threshold_fraction_", input$measure, ".", fmt_ext(input$frac_format)),
@@ -6076,7 +6173,7 @@ server <- function(input, output, session) {
     names(out)[names(out) == "sd_mean"]    <- "SD_Across_Reps"
     names(out)[names(out) == "sem_mean"]   <- "SEM_Across_Reps"
     names(out)[names(out) == "ci95_mean"]  <- "CI95_Halfwidth"
-    cbind(Measurement = input$measure, Direction = input$frac_direction %||% "above",
+    cbind(Measurement = current_measure(), Direction = input$frac_direction %||% "above",
           Threshold = signif(thr$threshold, 6), out)
   })
   output$frac_table <- renderDT({
@@ -6639,6 +6736,7 @@ server <- function(input, output, session) {
 
   output$es_plot <- renderPlot({ es_plot_obj() })
   register_legend_key("es", es_plot_obj)
+  register_batch_export("es", es_plot_obj, "effect_sizes")
   register_sized_plot("es_plot", "es", es_plot_obj, "450px")
   output$es_table <- renderDT({ req(es_data()); esd <- es_data(); esd[] <- lapply(esd, function(x) if (is.numeric(x)) round(x, 3) else x); datatable(esd, options = list(dom = 't')) })
   output$dl_es <- downloadHandler(
@@ -7593,7 +7691,7 @@ server <- function(input, output, session) {
   pub_panels_list <- reactive({
     req(input$pub_panels); panels <- list()
     base <- input$pub_base_size %||% 11; df <- transformed_data(); rs <- rep_summ()
-    cols <- cond_colors(); m <- input$measure; mlbl <- measure_label()
+    cols <- cond_colors(); m <- current_measure(); mlbl <- measure_label()
     if ("dist" %in% input$pub_panels) {
       df$Time_fac <- factor(fmt_time(df$Time_min), levels = fmt_time(sort(unique(df$Time_min))))
       rs$Time_fac <- factor(fmt_time(rs$Time_min), levels = fmt_time(sort(unique(rs$Time_min))))
@@ -7738,6 +7836,7 @@ server <- function(input, output, session) {
 
   output$pub_plot <- renderPlot({ if (has_patchwork) pub_plot_obj() })
   register_legend_key("pub", function() { req(has_patchwork); pub_plot_obj() })
+  register_batch_export("pub", function() { req(has_patchwork); pub_plot_obj() }, "figure")
   register_sized_plot("pub_plot", "pub", function() { req(has_patchwork); pub_plot_obj() }, "550px")
   output$dl_pub <- downloadHandler(filename = function() paste0("figure_", input$measure, ".", fmt_ext(input$pub_format)),
     content = function(file) save_figure(file, pub_plot_obj(), input$pub_width, input$pub_height, input$pub_dpi, input$pub_format, transparent = isTRUE(input$pub_transparent)))
