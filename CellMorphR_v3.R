@@ -601,24 +601,35 @@ legend_scale_info <- function(p) {
 legend_text_starter <- function(p, cvd = NULL) {
   infos <- unlist(lapply(legend_key_plots(p), legend_scale_info), recursive = FALSE)
   if (length(infos) == 0) return("")
-  clauses <- character(0); seen <- character(0)
+  # One clause per VARIABLE: when the same variable is encoded by several
+  # aesthetics (Replicate by cell colour and by marker shape, or Condition by
+  # colour and fill), each entry gets all its words at once -- "1 (reddish
+  # purple, filled circles)" -- rather than one clause per aesthetic.
+  groups <- list()
   for (inf in infos) {
-    if (inf$discrete) {
-      words <- switch(inf$aes, colour = , fill = colour_word(inf$values),
-                      shape = shape_word(inf$values), linetype = linetype_word(inf$values))
-      items <- paste0(inf$labels, " (", words, ")")
-      clause <- paste0(inf$title, ": ", paste(items, collapse = "; "), ".")
-    } else {
-      clause <- paste0(inf$title, ": colour scale from ", colour_word(inf$values[1]), " (", inf$labels[1],
-                       ") to ", colour_word(inf$values[2]), " (", inf$labels[2], ").")
+    if (!inf$discrete) {
+      key <- paste0("cont|", inf$title, "|", paste(inf$values, collapse = "|"))
+      groups[[key]] <- list(title = inf$title, discrete = FALSE, labels = inf$labels, values = inf$values)
+      next
     }
-    key <- paste(inf$title, paste(inf$labels, collapse = "|"), paste(inf$values, collapse = "|"))
-    if (key %in% seen) next
-    seen <- c(seen, key); clauses <- c(clauses, clause)
+    words <- switch(inf$aes, colour = , fill = colour_word(inf$values),
+                    shape = shape_word(inf$values), linetype = linetype_word(inf$values))
+    key <- paste0("disc|", inf$title, "|", paste(inf$labels, collapse = "|"))
+    g <- groups[[key]] %||% list(title = inf$title, discrete = TRUE, labels = inf$labels,
+                                 words = vector("list", length(inf$labels)))
+    for (i in seq_along(inf$labels)) g$words[[i]] <- unique(c(g$words[[i]], words[i]))
+    groups[[key]] <- g
   }
-  # Colour and fill that encode the same variable with the same colours read as one clause.
-  clauses <- unique(clauses)
-  txt <- paste(clauses, collapse = " ")
+  clauses <- vapply(groups, function(g) {
+    if (!g$discrete) {
+      paste0(g$title, ": colour scale from ", colour_word(g$values[1]), " (", g$labels[1],
+             ") to ", colour_word(g$values[2]), " (", g$labels[2], ").")
+    } else {
+      items <- vapply(seq_along(g$labels), function(i) paste0(g$labels[i], " (", paste(g$words[[i]], collapse = ", "), ")"), character(1))
+      paste0(g$title, ": ", paste(items, collapse = "; "), ".")
+    }
+  }, character(1))
+  txt <- paste(unique(unname(clauses)), collapse = " ")
   if (!is.null(cvd)) txt <- paste0(txt, " Colours as simulated for ", cvd, " (preview, not the chosen palette).")
   txt
 }

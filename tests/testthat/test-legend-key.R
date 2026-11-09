@@ -31,6 +31,12 @@ test_that("legend_text_starter writes one clause per legend from the plot's own 
     scale_colour_manual(values = c(Ctrl = "#0072B2", Trt = "#D55E00")) +
     scale_fill_manual(values = c(Ctrl = "#0072B2", Trt = "#D55E00"))
   expect_equal(length(gregexpr("Condition:", legend_text_starter(p2))[[1]]), 1)
+  expect_equal(legend_text_starter(p2), "Condition: Ctrl (blue); Trt (vermillion).")
+  # one variable encoded by colour AND shape: each entry gets both words, once
+  p3 <- ggplot(d, aes(x, y, colour = Replicate, shape = Replicate)) + geom_point() +
+    scale_colour_manual(values = c("#CC79A7", "#56B4E9", "#999999")) + scale_shape_manual(values = c(21, 22, 24))
+  expect_equal(legend_text_starter(p3),
+               "Replicate: 1 (reddish purple, filled circles); 2 (sky blue, filled squares); 3 (grey, filled triangles).")
   # continuous fill reads as a colour scale, with its limits
   h <- ggplot(data.frame(a = 1:3, b = 1:3, v = c(0, 5, 10)), aes(a, b, fill = v)) + geom_tile() +
     scale_fill_gradient(low = "white", high = "#D55E00")
