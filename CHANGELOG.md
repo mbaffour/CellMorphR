@@ -4,6 +4,23 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.7.0 — 2026-11-09
+
+**The legend text is now a whole legend draft.** The box under each figure's
+Legend Key used to describe only the key (which sample is which colour and
+marker). It now reads, in order: the measurement with its unit and transform
+("Area (µm²), log-transformed"; "raw values" on the Thresholds tab); the key
+clauses; then the figure's own subtitle and caption sentences. Those two are
+generated from the same inputs as the plot, so the draft states exactly what
+is drawn -- replicate medians or means, N per group, SD / SEM / 95% CI,
+baseline normalisation, the threshold value, the test and its correction --
+and cannot disagree with the figure. Long drafts wrap in the box. Tabs that
+plot several measurements at once (Morphospace, Phenotypes, Multi-Feature)
+omit the measurement sentence. The composite, whose panels carry no
+subtitles, gets one sentence per selected panel ("A, violins = single-cell
+distributions; dots = replicate medians; B, ..."), and a trajectory
+normalised to baseline says "raw values (normalised to baseline)".
+
 ## 3.6.0 — 2026-11-09
 
 **Sample colours you can read, export and carry over.** The Data tab gains a

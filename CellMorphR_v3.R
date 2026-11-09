@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.6.0
+# Version 3.7.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.6.0.
+#   anti-pseudoreplication statistics. Version 3.7.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.6.0"
+APP_VERSION <- "3.7.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -632,6 +632,44 @@ legend_text_starter <- function(p, cvd = NULL) {
   txt <- paste(unique(unname(clauses)), collapse = " ")
   if (!is.null(cvd)) txt <- paste0(txt, " Colours as simulated for ", cvd, " (preview, not the chosen palette).")
   txt
+}
+
+# A whole figure-legend draft: what was measured, the key, and the figure's own
+# subtitle and caption (which already state the display choices -- mean or
+# median, N per group, the error measure, normalisation, threshold, test and
+# correction -- because they are generated from the same inputs as the plot).
+tidy_sentence <- function(x) {
+  if (is.null(x) || length(x) == 0) return(character(0))
+  x <- gsub("\\s*\\n\\s*", " ", as.character(x))
+  x <- trimws(gsub("\\s+", " ", x))
+  x <- x[nzchar(x)]
+  if (length(x) == 0) return(character(0))
+  x <- paste0(toupper(substring(x, 1, 1)), substring(x, 2))
+  ifelse(grepl("[.!?]$", x), x, paste0(x, "."))
+}
+plot_text_labels <- function(p) {
+  if (inherits(p, "patchwork")) {
+    ann <- tryCatch(p$patches$annotation, error = function(e) NULL)
+    list(subtitle = ann$subtitle, caption = ann$caption)
+  } else if (inherits(p, "ggplot")) {
+    list(subtitle = p$labels$subtitle, caption = p$labels$caption)
+  } else list(subtitle = NULL, caption = NULL)
+}
+legend_draft_text <- function(p, measurement = NULL, cvd = NULL) {
+  key <- legend_text_starter(p, cvd = NULL)
+  labs_txt <- plot_text_labels(p)
+  cap <- tidy_sentence(labs_txt$caption)
+  # The caption already carries the colour-vision stamp when the preview is on;
+  # add it only when it does not.
+  if (!is.null(cvd) && !any(grepl("simulated for", cap)))
+    cap <- c(cap, paste0("Colours as simulated for ", cvd, " (preview, not the chosen palette)."))
+  parts <- c(
+    if (!is.null(measurement) && nzchar(measurement)) paste0("Measurement: ", measurement, "."),
+    if (nzchar(key)) key,
+    tidy_sentence(labs_txt$subtitle),
+    cap
+  )
+  paste(parts, collapse = " ")
 }
 
 # The figure with every discrete legend shown, parked at the right (for the
@@ -2057,11 +2095,11 @@ figure_controls_ui <- function(prefix, def_width = 8, def_height = 5, show_legen
       checkboxInput(paste0(prefix, "_legend_embed"), "Place legend key on the figure (top-left corner)", FALSE)
     else tags$p(class = "small text-muted", style = "font-size:10px;",
       "The composite always carries its shared legend key along the bottom of the figure."),
-    tags$label("Legend text starter (copy into your figure legend)", class = "small fw-bold"),
+    tags$label("Legend draft (copy into your figure legend)", class = "small fw-bold"),
     verbatimTextOutput(paste0(prefix, "_legend_text"), placeholder = TRUE),
     downloadButton(paste0("dl_", prefix, "_legend_key"), "Download Legend Key", class = "btn-outline-primary w-100 mt-1"),
     tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
-      "The key is this figure's own legend -- same colours, shapes, fills, names and font -- exported alone in the file format above. It follows the figure live.")
+      "The key is this figure's own legend -- same colours, shapes, fills, names and font -- exported alone in the file format above. The draft adds the measurement and the figure's own subtitle and caption (statistic, N, error measure, test), so it states exactly what is drawn. Both follow the figure live.")
   )
   controls
 }
@@ -2263,6 +2301,7 @@ div.dataTables_filter input { background-color: #2a2a42 !important; color: #e0e0
   letter-spacing: -0.5px; margin-bottom: 0.2rem; }
 .hero-landing h1 .morph-highlight { color: #81C784; }
 .hero-landing .version-tag { color: #8888a8; font-size: 1rem; font-weight: 300; }
+pre.shiny-text-output { white-space: pre-wrap; word-break: break-word; font-size: 0.78rem; }
 .hero-landing .mantra { color: #b0b0c8; font-size: 1.05rem; font-style: italic;
   margin: 0.8rem 0 0.4rem; }
 .hero-landing .motto { color: #FFB74D; font-size: 0.92rem; font-weight: 700;
@@ -3616,7 +3655,37 @@ server <- function(input, output, session) {
     })
     output[[paste0(prefix, "_legend_text")]] <- renderText({
       p <- plot_fn(); req(!is.null(p))
-      txt <- legend_text_starter(p, cvd_label(input$cvd_preview))
+      m <- input$measure; tr <- input$data_transform %||% "none"
+      u <- measure_unit_now()
+      # Thresholds work on raw values whatever the transform; everything else
+      # draws the transformed measurement.
+      unit_txt <- if (nzchar(u)) paste0(" (", u, ")") else ""
+      tr_txt <- switch(tr, log = ", log-transformed", sqrt = ", square-root transformed", "")
+      meas <- if (is.null(m)) NULL
+        else if (prefix == "frac") paste0(m, unit_txt, ", raw values")
+        else if (prefix == "traj" && isTRUE(tryCatch(traj_data()$on_raw, error = function(e) FALSE))) paste0(m, unit_txt, ", raw values (normalised to baseline)")
+        else if (prefix %in% c("mf", "pca", "clust")) NULL   # several measurements at once
+        else paste0(m, unit_txt, tr_txt)
+      # The composite's panels carry no subtitles, so describe each panel here.
+      extra <- NULL
+      if (prefix == "pub") {
+        err <- if (isTRUE(input$traj_error %||% TRUE)) error_measure_label(input$traj_error_type %||% "sem") else NULL
+        panel_txt <- c(
+          dist = "violins = single-cell distributions; dots = replicate medians",
+          traj = paste0("points = replicate medians over time; dashed lines connect replicates; solid line = trend",
+                        if (!is.null(err)) paste0("; bars = ", err, " of replicate medians") else ""),
+          effect = "percent change of replicate medians vs the reference condition",
+          morphospace = "PCA scores of single cells",
+          phenotype = "share of cells in each phenotype cluster",
+          cellmetrics = "mean of all cells per group over time",
+          radar = "mean of each measurement per condition",
+          morph_traj = "path of each condition's centroid through PCA space",
+          morph_div = "convex-hull area of each condition in PCA space")
+        sel <- intersect(input$pub_panels %||% character(0), names(panel_txt))
+        if (length(sel)) extra <- paste0("Panels: ", paste(paste0(LETTERS[seq_along(sel)], ", ", panel_txt[sel]), collapse = "; "), ".")
+      }
+      txt <- legend_draft_text(p, measurement = meas, cvd = cvd_label(input$cvd_preview))
+      if (!is.null(extra)) txt <- paste(txt, extra)
       if (!nzchar(txt)) "This figure maps nothing to colour, fill, shape or line type." else txt
     })
     output[[paste0("dl_", prefix, "_legend_key")]] <- downloadHandler(
