@@ -24,8 +24,10 @@ switch.
   circles); 2 (filled triangles); 3 (filled squares)." Colour words come from
   the nearest of a small named set (Okabe-Ito names included), shape words
   from the plotting-symbol table; continuous scales read as "colour scale from
-  white (0) to vermillion (10)". When the colour-vision preview is on, the
-  sentence says the words describe simulated colours.
+  white (0) to vermillion (10)". A variable encoded by more than one aesthetic
+  (Replicate by cell colour and marker shape) gets one clause with every word
+  per entry: "1 (reddish purple, filled circles)". When the colour-vision
+  preview is on, the sentence says the words describe simulated colours.
 - **Place on the figure.** Moves the legend inside the panel, top-left, on a
   translucent white box. The composite figure keeps its shared legend along
   the bottom instead (a collected legend cannot be placed inside), and its
