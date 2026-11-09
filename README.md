@@ -22,7 +22,7 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 
 | Version | App file | Status |
 |---------|----------|--------|
-| **3.9.0** (current) | `CellMorphR_v3.R` | Maintained. Batch figure export (measurements x formats), 12 tabs including a Legend tab, report workbook, unit picker, legend draft with display choices, sample colour map (hex table, CSV export/import), legend key (standalone, text starter, on-figure) for every main figure, 11 analysis tabs, SuperPlot options, fraction-of-cells-beyond-threshold analysis, replicate power planner, baseline-normalised trajectories, colourblind-safe default palette with colour-vision preview, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, multi-file import, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
+| **3.10.0** (current) | `CellMorphR_v3.R` | Maintained. Legend key on every figure (secondary figures included), format-aware Trend/Power/EMM downloads, Batch figure export (measurements x formats), 12 tabs including a Legend tab, report workbook, unit picker, legend draft with display choices, sample colour map (hex table, CSV export/import), legend key (standalone, text starter, on-figure) for every figure, 11 analysis tabs, SuperPlot options, fraction-of-cells-beyond-threshold analysis, replicate power planner, baseline-normalised trajectories, colourblind-safe default palette with colour-vision preview, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, multi-file import, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
 Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
@@ -527,7 +527,11 @@ another dataset.
 
 ### Legend key
 
-Every main figure has a **Legend Key** block at the end of its sidebar:
+Every main figure has a **Legend Key** block at the end of its sidebar, and
+every secondary figure (PCA loadings, trajectory, diversity and scree; optimal
+k and morphospace by phenotype; raw heatmap, radar and feature importance;
+trend, EMM and power) has the same three things folded under its plot as a
+**Legend key** panel:
 
 - **Download Legend Key** - the figure's own legend as a standalone image, in
   the tab's export format. Same colours, shapes, fills, line types, names and
@@ -540,14 +544,17 @@ Every main figure has a **Legend Key** block at the end of its sidebar:
   group, the error measure, any normalisation or threshold, and the test and
   correction behind any brackets.
 - **Place legend key on the figure** - moves the same legend inside the panel,
-  top-left. The composite keeps its shared legend along the bottom.
+  top-left. The composite keeps its shared legend along the bottom; the
+  two-panel loadings and diversity figures put it inside their first panel.
+  Figures with nothing mapped to colour, shape or line type (scree, optimal k,
+  trend) say so and still get a draft.
 
 The PPTX panel deck includes a legend-key slide.
 
 ### Legend tab
 
-One place for every main figure's legend key and draft, drawn from the same
-live settings as the figure tabs: a key image and Download Key per figure, the
+One place for every figure's legend key and draft (main figures first, then
+the secondary figures), drawn from the same live settings as the figure tabs: a key image and Download Key per figure, the
 full draft (what the marks are, the measurement, the key, the statistic, N,
 error measure, normalisation or threshold, the test, and the data behind it:
 cells, conditions and timepoints shown, replicates per group, source file,

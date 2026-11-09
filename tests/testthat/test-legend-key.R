@@ -107,3 +107,18 @@ test_that("plot descriptions and the data sentence read correctly", {
   expect_equal(s2, "Data: 100 cells; 2 conditions (WT, Mut); 2-3 biological replicates per group.")
   expect_true("µm²" %in% UNIT_CHOICES)
 })
+
+# 3.10.0: every figure in the Legend-tab registry has a description, and the
+# secondary figures (loadings, scree, radar, trend, EMM, power ...) are in it.
+test_that("every registered figure has a legend description, including the secondary figures", {
+  expect_true(all(c("pca_loadings", "pca_traj", "pca_diversity", "pca_scree", "clust_k", "clust_pca",
+                    "mf_raw", "mf_radar", "mf_importance", "trend", "emm", "power") %in% names(LEGEND_FIGURE_TITLES)))
+  expect_equal(anyDuplicated(names(LEGEND_FIGURE_TITLES)), 0)
+  # dist, es and cm are described per chart type, so pass one for them
+  typed <- c(dist = "violin", es = "abs_diff", cm = "bar")
+  for (pf in names(LEGEND_FIGURE_TITLES)) expect_false(is.null(plot_description(pf, typed[pf])), info = pf)
+  expect_match(plot_description("power"), "replicates per group")
+  # figures drawing several measurements never name one in the draft
+  expect_true(all(c("pca_scree", "mf_radar", "clust_pca") %in% LEGEND_MULTI_MEASURE))
+  expect_false(any(c("trend", "emm", "power") %in% LEGEND_MULTI_MEASURE))
+})
