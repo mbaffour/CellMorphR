@@ -4,6 +4,26 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.9.0 — 2026-11-09
+
+**Downloads: format beside the button, batch export, EPS fix.**
+
+- **File format beside Download Figure.** The format dropdown (PDF, PNG, SVG,
+  TIFF, EPS, editable PPTX) now sits right next to each tab's Download button
+  instead of at the bottom of the long Export Settings list, where it was
+  easy to miss. Same input, so the legend key export follows it as before.
+- **Batch export** on the Distributions, Trajectories, Thresholds, Effect
+  Sizes and Pub Figure tabs: tick any measurements and any formats and get
+  one ZIP with that figure, every current edit applied (titles, labels,
+  annotations, typography, size, palette, filters), for each measurement in
+  each format. Implemented by a measurement override that every figure
+  reactive reads, so the batch uses exactly the on-screen code path; the
+  figures return to the selected measurement when it finishes.
+- **EPS export wrote nothing on some Macs.** R reported cairo as available
+  while its library could not load (no XQuartz), so `ggsave` failed silently.
+  The EPS branch now checks that the file exists and falls back to the plain
+  PostScript device with a notice.
+
 ## 3.8.0 — 2026-11-09
 
 **Legend tab, fuller legend drafts, report workbook, unit picker.**
