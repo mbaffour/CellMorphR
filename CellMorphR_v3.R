@@ -1,13 +1,13 @@
 # =============================================================================
 # CellMorphR -- Single-Cell Morphometry Analysis Suite
-# Version 3.4.0
+# Version 3.5.0
 # For time-resolved microscopy experiments (e.g., bacteriophage infection)
 #
 # Author: Michael Baffour Awuah <mbaffour890@gmail.com>
 #
 # Citation:
 #   Awuah, M.B. CellMorphR: Single-cell morphometry analysis with
-#   anti-pseudoreplication statistics. Version 3.4.0.
+#   anti-pseudoreplication statistics. Version 3.5.0.
 #   URL: https://github.com/mbaffour/CellMorphR
 # =============================================================================
 # Easiest way to run on Windows: double-click run_cellmorphr.bat (in this
@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.4.0"
+APP_VERSION <- "3.5.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -505,6 +505,192 @@ parse_annotations <- function(txt) {
   xn <- suppressWarnings(as.numeric(out$x))
   if (all(is.finite(xn))) out$x <- xn
   out
+}
+
+# =============================================================================
+# LEGEND KEY (3.5.0)
+# A legend key is the figure's OWN legend, lifted out of the live plot object:
+# the same colours, fills, shapes, line types, names and font, by construction.
+# legend_key_plot() turns every discrete legend back on (figures that hide
+# theirs on purpose, e.g. when the x axis already names the samples, still get
+# a key) and either parks the legend at the right for extraction or moves it
+# inside the panel for embedding. The text starter reads the same scales.
+# =============================================================================
+LEGEND_COLOUR_WORDS <- c(
+  black = "#000000", white = "#FFFFFF", grey = "#999999", "dark grey" = "#4B4B4B", "light grey" = "#C8C8C8",
+  blue = "#0072B2", "sky blue" = "#56B4E9", vermillion = "#D55E00", orange = "#E69F00",
+  "bluish green" = "#009E73", yellow = "#F0E442", "reddish purple" = "#CC79A7",
+  red = "#E41A1C", green = "#4DAF4A", "dark green" = "#1B7837", purple = "#984EA3", pink = "#F781BF",
+  brown = "#A65628", teal = "#2A9D8F", navy = "#1D3557", olive = "#808000", magenta = "#FF00FF",
+  cyan = "#00FFFF", "light blue" = "#AEC6CF", gold = "#F5A623"
+)
+colour_word <- function(hex) {
+  hex <- as.character(hex); out <- rep(NA_character_, length(hex))
+  dict_lab <- grDevices::convertColor(t(grDevices::col2rgb(LEGEND_COLOUR_WORDS)) / 255, from = "sRGB", to = "Lab")
+  for (i in seq_along(hex)) {
+    rgbv <- tryCatch(t(grDevices::col2rgb(hex[i])) / 255, error = function(e) NULL)
+    if (is.null(rgbv)) { out[i] <- hex[i]; next }
+    lab <- grDevices::convertColor(rgbv, from = "sRGB", to = "Lab")
+    d <- sqrt(rowSums((dict_lab - matrix(lab, nrow(dict_lab), 3, byrow = TRUE))^2))
+    out[i] <- names(LEGEND_COLOUR_WORDS)[which.min(d)]
+  }
+  out
+}
+SHAPE_WORDS <- c(
+  "0" = "open squares", "1" = "open circles", "2" = "open triangles", "3" = "plus signs", "4" = "crosses",
+  "5" = "open diamonds", "6" = "open inverted triangles", "7" = "crossed squares", "8" = "asterisks",
+  "9" = "crossed diamonds", "10" = "circled plus signs", "11" = "stars", "12" = "squared plus signs",
+  "13" = "circled crosses", "14" = "squared triangles", "15" = "squares", "16" = "circles",
+  "17" = "triangles", "18" = "diamonds", "19" = "circles", "20" = "small circles",
+  "21" = "filled circles", "22" = "filled squares", "23" = "filled diamonds", "24" = "filled triangles",
+  "25" = "inverted triangles"
+)
+shape_word <- function(pch) {
+  key <- as.character(suppressWarnings(as.integer(pch)))
+  out <- unname(SHAPE_WORDS[key])
+  out[is.na(out)] <- paste("shape", as.character(pch)[is.na(out)])
+  out
+}
+LINETYPE_WORDS <- c("1" = "solid lines", "2" = "dashed lines", "3" = "dotted lines", "4" = "dot-dash lines",
+                    "5" = "long-dashed lines", "6" = "two-dash lines",
+                    solid = "solid lines", dashed = "dashed lines", dotted = "dotted lines",
+                    dotdash = "dot-dash lines", longdash = "long-dashed lines", twodash = "two-dash lines")
+linetype_word <- function(lt) { out <- unname(LINETYPE_WORDS[as.character(lt)]); out[is.na(out)] <- paste("line type", lt[is.na(out)]); out }
+
+# Every ggplot inside a patchwork, plus the top-level plot; a plain ggplot is a list of one.
+legend_key_plots <- function(p) {
+  if (inherits(p, "patchwork")) {
+    inner <- tryCatch(p$patches$plots, error = function(e) NULL)
+    plots <- c(inner %||% list(), list(p))
+    plots[vapply(plots, function(q) inherits(q, "ggplot") && length(q$layers) > 0, logical(1))]
+  } else if (inherits(p, "ggplot")) list(p) else list()
+}
+
+# The discrete and continuous legend scales of one ggplot, as data.
+legend_scale_info <- function(p) {
+  b <- tryCatch(ggplot_build(p), error = function(e) NULL)
+  if (is.null(b)) return(list())
+  scales <- b$plot$scales$scales
+  out <- list()
+  for (sc in scales) {
+    aes <- intersect(sc$aesthetics, c("colour", "fill", "shape", "linetype"))
+    if (length(aes) == 0) next
+    aes <- aes[1]
+    title <- if (!inherits(sc$name, "waiver") && !is.null(sc$name)) as.character(sc$name) else (b$plot$labels[[aes]] %||% aes)
+    if (isTRUE(sc$is_discrete())) {
+      br <- tryCatch(sc$get_breaks(), error = function(e) NULL)
+      br <- br[!is.na(br)]
+      if (length(br) == 0) next
+      labs <- tryCatch(as.character(sc$get_labels(br)), error = function(e) as.character(br))
+      vals <- tryCatch(sc$map(br), error = function(e) NULL)
+      if (is.null(vals)) next
+      out[[length(out) + 1]] <- list(aes = aes, title = as.character(title), discrete = TRUE, labels = labs, values = vals)
+    } else if (aes %in% c("colour", "fill")) {
+      lim <- tryCatch(sc$get_limits(), error = function(e) NULL)
+      if (is.null(lim) || any(!is.finite(lim))) next
+      vals <- tryCatch(sc$map(lim), error = function(e) NULL)
+      if (is.null(vals)) next
+      out[[length(out) + 1]] <- list(aes = aes, title = as.character(title), discrete = FALSE,
+                                     labels = vapply(lim, function(v) trimws(format(signif(v, 3))), character(1)), values = vals)
+    }
+  }
+  out
+}
+
+# Plain-language sentence: one clause per legend, ready to paste into a figure legend.
+legend_text_starter <- function(p, cvd = NULL) {
+  infos <- unlist(lapply(legend_key_plots(p), legend_scale_info), recursive = FALSE)
+  if (length(infos) == 0) return("")
+  clauses <- character(0); seen <- character(0)
+  for (inf in infos) {
+    if (inf$discrete) {
+      words <- switch(inf$aes, colour = , fill = colour_word(inf$values),
+                      shape = shape_word(inf$values), linetype = linetype_word(inf$values))
+      items <- paste0(inf$labels, " (", words, ")")
+      clause <- paste0(inf$title, ": ", paste(items, collapse = "; "), ".")
+    } else {
+      clause <- paste0(inf$title, ": colour scale from ", colour_word(inf$values[1]), " (", inf$labels[1],
+                       ") to ", colour_word(inf$values[2]), " (", inf$labels[2], ").")
+    }
+    key <- paste(inf$title, paste(inf$labels, collapse = "|"), paste(inf$values, collapse = "|"))
+    if (key %in% seen) next
+    seen <- c(seen, key); clauses <- c(clauses, clause)
+  }
+  # Colour and fill that encode the same variable with the same colours read as one clause.
+  clauses <- unique(clauses)
+  txt <- paste(clauses, collapse = " ")
+  if (!is.null(cvd)) txt <- paste0(txt, " Colours as simulated for ", cvd, " (preview, not the chosen palette).")
+  txt
+}
+
+# The figure with every discrete legend shown, parked at the right (for the
+# standalone key) or placed inside the panel, top-left (for embedding).
+legend_key_plot <- function(p, inside = FALSE) {
+  place <- if (inside) theme(
+      legend.position = "inside", legend.position.inside = c(0.02, 0.98),
+      legend.justification.inside = c(0, 1), legend.direction = "vertical", legend.box = "vertical",
+      legend.background = element_rect(fill = scales::alpha("white", 0.85), colour = NA),
+      legend.margin = margin(4, 6, 4, 6))
+    else theme(legend.position = "right", legend.direction = "vertical", legend.box = "vertical")
+  if (inherits(p, "patchwork")) {
+    # A composite with collected guides cannot host an inside legend; it keeps
+    # the shared legend it already carries. Only the standalone extraction
+    # (legend parked at the right) is meaningful here.
+    if (inside) return(p)
+    return(p + patchwork::plot_annotation(theme = place))
+  }
+  if (!inherits(p, "ggplot")) return(p)
+  infos <- legend_scale_info(p)
+  disc <- unique(vapply(infos[vapply(infos, function(i) isTRUE(i$discrete), logical(1))], function(i) i$aes, character(1)))
+  if (length(disc) > 0) {
+    gl <- setNames(lapply(disc, function(a) guide_legend()), disc)
+    p <- p + do.call(guides, gl)
+  }
+  p + place
+}
+
+# Pull the (first non-empty) guide-box out of a built figure, searching nested gtables.
+extract_legend_grob <- function(p) {
+  # Building a grob needs a graphics device for text metrics. Outside a render
+  # (download handlers, tests) none is open and R would create Rplots.pdf in
+  # the working directory; a null PDF device avoids that.
+  grDevices::pdf(NULL); on.exit(grDevices::dev.off(), add = TRUE)
+  g <- tryCatch(if (inherits(p, "patchwork")) patchwork::patchworkGrob(p) else ggplotGrob(p), error = function(e) NULL)
+  if (is.null(g)) return(NULL)
+  find_box <- function(gt) {
+    if (!inherits(gt, "gtable")) return(NULL)
+    nms <- gt$layout$name
+    for (i in seq_along(gt$grobs)) {
+      gr <- gt$grobs[[i]]
+      if (grepl("guide-box", nms[i]) && !inherits(gr, "zeroGrob") && length(gr$grobs %||% list()) > 0) return(gr)
+    }
+    for (gr in gt$grobs) { r <- find_box(gr); if (!is.null(r)) return(r) }
+    NULL
+  }
+  find_box(g)
+}
+
+# Natural size of a legend grob in inches, resolved on a null PDF device so the
+# app and headless runs agree; a small margin all round.
+legend_key_size <- function(g, margin_in = 0.1) {
+  grDevices::pdf(NULL); on.exit(grDevices::dev.off(), add = TRUE)
+  w <- tryCatch(grid::convertUnit(gtable::gtable_width(g), "in", valueOnly = TRUE), error = function(e) 2)
+  h <- tryCatch(grid::convertUnit(gtable::gtable_height(g), "in", valueOnly = TRUE), error = function(e) 2)
+  list(w = max(0.5, w + 2 * margin_in), h = max(0.3, h + 2 * margin_in))
+}
+
+# Label text inside a legend grob (for tests: embedded and standalone keys must agree).
+legend_grob_labels <- function(g) {
+  out <- character(0)
+  walk <- function(x) {
+    if (is.null(x)) return(invisible())
+    if (inherits(x, "text")) { out <<- c(out, as.character(x$label)); return(invisible()) }
+    # gtables keep their cells in $grobs and an (often empty) $children gList;
+    # gTrees keep theirs in $children. Walk both.
+    if (!is.null(x$grobs)) for (ch in x$grobs) walk(ch)
+    if (!is.null(x$children)) for (ch in x$children) walk(ch)
+  }
+  walk(g); unique(out[nzchar(out)])
 }
 
 
@@ -1804,7 +1990,19 @@ figure_controls_ui <- function(prefix, def_width = 8, def_height = 5, show_legen
     checkboxInput(paste0(prefix, "_transparent"), "Transparent background (PNG/PDF/SVG)", FALSE),
     selectInput(paste0(prefix, "_format"), "File format",
       choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg", "TIFF" = "tiff", "EPS" = "eps",
-                  "PPTX (editable)" = "pptx"), selected = "pdf")
+                  "PPTX (editable)" = "pptx"), selected = "pdf"),
+    tags$hr(),
+    # --- Legend key: the figure's own legend, standalone or on the figure ---
+    tags$p(tags$strong("Legend Key"), class = "mb-1"),
+    if (prefix != "pub")
+      checkboxInput(paste0(prefix, "_legend_embed"), "Place legend key on the figure (top-left corner)", FALSE)
+    else tags$p(class = "small text-muted", style = "font-size:10px;",
+      "The composite always carries its shared legend key along the bottom of the figure."),
+    tags$label("Legend text starter (copy into your figure legend)", class = "small fw-bold"),
+    verbatimTextOutput(paste0(prefix, "_legend_text"), placeholder = TRUE),
+    downloadButton(paste0("dl_", prefix, "_legend_key"), "Download Legend Key", class = "btn-outline-primary w-100 mt-1"),
+    tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
+      "The key is this figure's own legend -- same colours, shapes, fills, names and font -- exported alone in the file format above. It follows the figure live.")
   )
   controls
 }
@@ -1880,6 +2078,10 @@ apply_custom_labs <- function(p, input, prefix) {
     p <- p + labs(caption = paste0(if (!is.null(prev) && nzchar(prev)) paste0(prev, " ") else "",
                                    "Colours simulated for ", cvd, " (preview, not the chosen palette)."))
   }
+  # Legend key on the figure: the figure's own legend, every discrete legend
+  # shown, moved inside the panel. legend_key_plot() is also what the standalone
+  # download is cut from, so the two always match.
+  if (isTRUE(input[[paste0(prefix, "_legend_embed")]])) p <- legend_key_plot(p, inside = TRUE)
   # Fold long text so it never runs past the figure edge (auto or custom alike).
   # The fold width follows the EXPORT width and the font size: a 3.5-inch
   # journal column at 7 pt holds a third of the characters an 8-inch figure at
@@ -3275,8 +3477,9 @@ server <- function(input, output, session) {
           val <- input[[paste0(src, "_", fld)]]
           if (!is.null(val)) updateSelectInput(session, paste0(tgt, "_", fld), selected = val)
         }
-        if (!is.null(input[[paste0(src, "_transparent")]]))
-          updateCheckboxInput(session, paste0(tgt, "_transparent"), value = isTRUE(input[[paste0(src, "_transparent")]]))
+        for (fld in c("transparent", "legend_embed"))
+          if (!is.null(input[[paste0(src, "_", fld)]]))
+            updateCheckboxInput(session, paste0(tgt, "_", fld), value = isTRUE(input[[paste0(src, "_", fld)]]))
       }
       showNotification("Typography and export size applied to all tabs.", type = "message")
     })
@@ -3325,6 +3528,31 @@ server <- function(input, output, session) {
     }, deleteFile = TRUE)
   }
 
+  # --- Legend key per figure ----------------------------------------------------
+  # Everything is derived from the live plot reactive, so renamed conditions,
+  # changed colours or a different sample selection show up at once.
+  register_legend_key <- function(prefix, plot_fn) {
+    key_grob <- reactive({
+      p <- plot_fn(); req(!is.null(p))
+      g <- extract_legend_grob(legend_key_plot(p, inside = FALSE))
+      validate(need(!is.null(g), "This figure has no legend to key (nothing is mapped to colour, fill, shape or line type)."))
+      g
+    })
+    output[[paste0(prefix, "_legend_text")]] <- renderText({
+      p <- plot_fn(); req(!is.null(p))
+      txt <- legend_text_starter(p, cvd_label(input$cvd_preview))
+      if (!nzchar(txt)) "This figure maps nothing to colour, fill, shape or line type." else txt
+    })
+    output[[paste0("dl_", prefix, "_legend_key")]] <- downloadHandler(
+      filename = function() paste0("legend_key_", prefix, "_", input$measure %||% "figure", ".", fmt_ext(input[[paste0(prefix, "_format")]] %||% "pdf")),
+      content = function(file) {
+        g <- key_grob(); sz <- legend_key_size(g)
+        save_figure(file, g, sz$w, sz$h, input[[paste0(prefix, "_dpi")]] %||% 300,
+                    input[[paste0(prefix, "_format")]] %||% "pdf",
+                    transparent = isTRUE(input[[paste0(prefix, "_transparent")]]))
+      })
+  }
+
   # --- Figure settings: collect / apply (Save Session and the .json style file) ---
   # Every static figure-control input of every tab: typography, labels,
   # annotations, axis range, export size and format. Restored through
@@ -3339,7 +3567,7 @@ server <- function(input, output, session) {
   figure_setting_fields <- c(typo_fields, "grid", "border",
     "custom_title", "custom_subtitle", "custom_x_label", "custom_y_label", "custom_legend",
     "custom_caption", "custom_y_min", "custom_y_max", "custom_annot",
-    "width", "height", "dpi", "format", "transparent", "preview_size", "preview_zoom")
+    "width", "height", "dpi", "format", "transparent", "preview_size", "preview_zoom", "legend_embed")
   collect_figure_settings <- function() {
     ids <- as.vector(outer(all_fig_prefixes, figure_setting_fields, paste, sep = "_"))
     vals <- lapply(ids, function(id) input[[id]])
@@ -3410,7 +3638,9 @@ server <- function(input, output, session) {
           s <- min(10 / width, 7.5 / height, 1)
           doc <- officer::read_pptx()
           doc <- officer::add_slide(doc, layout = "Blank", master = "Office Theme")
-          doc <- officer::ph_with(doc, rvg::dml(ggobj = plot_obj),
+          gfx <- if (inherits(plot_obj, "ggplot")) rvg::dml(ggobj = plot_obj, bg = bg)
+                 else rvg::dml(code = grid::grid.draw(plot_obj), bg = bg)
+          doc <- officer::ph_with(doc, gfx,
                    location = officer::ph_location(
                      left = (10 - width * s) / 2, top = (7.5 - height * s) / 2,
                      width = width * s, height = height * s))
@@ -5073,6 +5303,7 @@ server <- function(input, output, session) {
   })
 
   output$dist_plot <- renderPlot({ dist_plot_obj() })
+  register_legend_key("dist", dist_plot_obj)
   register_sized_plot("dist_plot", "dist", dist_plot_obj, "600px")
   output$dl_dist <- downloadHandler(
     filename = function() paste0("distributions_", input$measure, ".", fmt_ext(input$dist_format)),
@@ -5221,6 +5452,7 @@ server <- function(input, output, session) {
   })
 
   output$traj_plot <- renderPlot({ traj_plot_obj() })
+  register_legend_key("traj", traj_plot_obj)
   register_sized_plot("traj_plot", "traj", traj_plot_obj, "550px")
   output$dl_traj <- downloadHandler(
     filename = function() paste0("trajectory_", input$measure, ".", fmt_ext(input$traj_format)),
@@ -5380,6 +5612,7 @@ server <- function(input, output, session) {
     apply_custom_labs(p, input, "frac")
   })
   output$frac_plot <- renderPlot({ frac_plot_obj() })
+  register_legend_key("frac", frac_plot_obj)
   register_sized_plot("frac_plot", "frac", frac_plot_obj, "550px")
   output$dl_frac <- downloadHandler(
     filename = function() paste0("threshold_fraction_", input$measure, ".", fmt_ext(input$frac_format)),
@@ -5956,6 +6189,7 @@ server <- function(input, output, session) {
   })
 
   output$es_plot <- renderPlot({ es_plot_obj() })
+  register_legend_key("es", es_plot_obj)
   register_sized_plot("es_plot", "es", es_plot_obj, "450px")
   output$es_table <- renderDT({ req(es_data()); esd <- es_data(); esd[] <- lapply(esd, function(x) if (is.numeric(x)) round(x, 3) else x); datatable(esd, options = list(dom = 't')) })
   output$dl_es <- downloadHandler(
@@ -6042,6 +6276,7 @@ server <- function(input, output, session) {
     if (!is.null(res) && res$ok) pca_scatter_obj()
     else { plot.new(); text(0.5, 0.5, if (!is.null(res)) res$msg else "Need >= 2 features.", cex = 1.2) }
   })
+  register_legend_key("pca", function() { res <- pca_result(); req(!is.null(res) && res$ok); pca_scatter_obj() })
   register_sized_plot("pca_scatter", "pca", function() { res <- pca_result(); req(!is.null(res) && res$ok); pca_scatter_obj() }, "550px")
   pca_scree_obj <- reactive({
     req(pca_result()); res <- pca_result(); req(res$ok)
@@ -6255,6 +6490,7 @@ server <- function(input, output, session) {
   })
 
   output$clust_composition <- renderPlot({ clust_comp_obj() })
+  register_legend_key("clust", clust_comp_obj)
   register_sized_plot("clust_composition", "clust", clust_comp_obj, "450px")
 
   output$clust_comp_table <- renderDT({
@@ -6360,6 +6596,7 @@ server <- function(input, output, session) {
   })
 
   output$mf_heatmap <- renderPlot({ mf_heatmap_obj() })
+  register_legend_key("mf", mf_heatmap_obj)
   register_sized_plot("mf_heatmap", "mf", mf_heatmap_obj, "500px")
 
   mf_importance_obj <- reactive({
@@ -6827,6 +7064,7 @@ server <- function(input, output, session) {
   })
 
   output$cm_chart <- renderPlot({ cm_plot_obj() })
+  register_legend_key("cm", cm_plot_obj)
   register_sized_plot("cm_chart", "cm", cm_plot_obj, "550px")
 
   output$cm_table <- renderDT({
@@ -7039,16 +7277,18 @@ server <- function(input, output, session) {
     # guides = "collect" lifts the single kept legend out of its panel and into
     # one shared legend under the whole figure, so it cannot overflow a panel.
     cvd <- cvd_label(input$cvd_preview)
-    patchwork::wrap_plots(labeled, ncol = if (n_panels == 1) 1 else 2, guides = "collect") +
+    comp <- patchwork::wrap_plots(labeled, ncol = if (n_panels == 1) 1 else 2, guides = "collect") +
       patchwork::plot_annotation(
         title = pub_title,
         caption = if (!is.null(cvd)) paste0("Colours simulated for ", cvd, " (preview, not the chosen palette).") else NULL,
         theme = theme_publication(base) +
           theme(legend.position = "bottom", legend.box = "horizontal",
                 legend.justification = "center"))
+    comp
   })
 
   output$pub_plot <- renderPlot({ if (has_patchwork) pub_plot_obj() })
+  register_legend_key("pub", function() { req(has_patchwork); pub_plot_obj() })
   register_sized_plot("pub_plot", "pub", function() { req(has_patchwork); pub_plot_obj() }, "550px")
   output$dl_pub <- downloadHandler(filename = function() paste0("figure_", input$measure, ".", fmt_ext(input$pub_format)),
     content = function(file) save_figure(file, pub_plot_obj(), input$pub_width, input$pub_height, input$pub_dpi, input$pub_format, transparent = isTRUE(input$pub_transparent)))
@@ -7294,6 +7534,17 @@ server <- function(input, output, session) {
                                 location = officer::ph_location_type(type = "title"))
           officer::ph_with(d, rvg::dml(ggobj = panels[[i]]),
                            location = officer::ph_location(left = 0.5, top = 1.2, width = 9, height = 5.8))
+        }, error = function(e) doc)
+      }
+      # One more slide: the composite's legend key, as editable vector graphics.
+      g <- tryCatch(extract_legend_grob(legend_key_plot(pub_plot_obj(), inside = FALSE)), error = function(e) NULL)
+      if (!is.null(g)) {
+        sz <- legend_key_size(g); s <- min(9 / sz$w, 5.8 / sz$h, 1)
+        doc <- officer::add_slide(doc, layout = "Title and Content", master = "Office Theme")
+        doc <- tryCatch({
+          d <- officer::ph_with(doc, "Legend key", location = officer::ph_location_type(type = "title"))
+          officer::ph_with(d, rvg::dml(code = grid::grid.draw(g)),
+                           location = officer::ph_location(left = 0.5, top = 1.2, width = sz$w * s, height = sz$h * s))
         }, error = function(e) doc)
       }
       print(doc, target = file)

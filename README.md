@@ -22,7 +22,7 @@ Prefer the terminal? `Rscript launcher.R` (Windows) or `Rscript run_app.R` (macO
 
 | Version | App file | Status |
 |---------|----------|--------|
-| **3.4.0** (current) | `CellMorphR_v3.R` | Maintained. 11 analysis tabs, SuperPlot options, fraction-of-cells-beyond-threshold analysis, replicate power planner, baseline-normalised trajectories, colourblind-safe default palette with colour-vision preview, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, multi-file import, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
+| **3.5.0** (current) | `CellMorphR_v3.R` | Maintained. Legend key (standalone, text starter, on-figure) for every main figure, 11 analysis tabs, SuperPlot options, fraction-of-cells-beyond-threshold analysis, replicate power planner, baseline-normalised trajectories, colourblind-safe default palette with colour-vision preview, per-measurement axis units, SD/SEM/95% CI error bars, plot-data CSV export, multi-file import, click-to-edit figure text, editable PDF/SVG/PowerPoint export, dose-response trend test, anti-pseudoreplication statistics throughout. **The global models were corrected in 3.2.0 — p-values and effect sizes from 3.1.2 and earlier are not comparable. See CHANGELOG.md.** |
 | 1.0.0 | `archive/CellMorphR_v1.0.R` | Archived and unmaintained - see [archive/README.md](archive/README.md). |
 
 Every release is downloadable from the [Releases page](https://github.com/mbaffour/CellMorphR/releases).
@@ -522,6 +522,22 @@ will be. A **transparent background** option covers PNG, PDF, SVG and EPS.
 All of these settings are stored in a saved session, and **Save Figure Style
 (.json)** on the Data tab writes them alone so one look can be loaded onto
 another dataset.
+
+### Legend key
+
+Every main figure has a **Legend Key** block at the end of its sidebar:
+
+- **Download Legend Key** - the figure's own legend as a standalone image, in
+  the tab's export format. Same colours, shapes, fills, line types, names and
+  font as the figure, because it *is* the figure's legend, taken from the live
+  plot. Figures that hide their legend (sample names on the x axis) still get one.
+- **Legend text starter** - a sentence to paste into your figure legend:
+  "Condition: Uninfected (blue); +N4 (vermillion). Replicate: 1 (filled
+  circles); ..."
+- **Place legend key on the figure** - moves the same legend inside the panel,
+  top-left. The composite keeps its shared legend along the bottom.
+
+The PPTX panel deck includes a legend-key slide.
 
 ### Exporting
 
@@ -1070,7 +1086,7 @@ If you use CellMorphR in your research, please cite:
   title   = {CellMorphR: Single-Cell Morphometry Analysis Suite for Bacteriophage Infection Experiments},
   year    = {2026},
   url     = {https://github.com/mbaffour/CellMorphR},
-  version = {3.4.0}
+  version = {3.5.0}
 }
 ```
 

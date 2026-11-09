@@ -4,6 +4,42 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.5.0 — 2026-11-08
+
+**Legend key on every main figure.** Each figure tab's controls gain a
+"Legend Key" block with three things and nothing else: a one-click **Download
+Legend Key** (in the tab's chosen format: PDF, PNG, SVG, TIFF, EPS or editable
+PPTX), a **legend text starter**, and a **Place legend key on the figure**
+switch.
+
+- **The key is the figure's own legend.** It is lifted out of the live plot
+  object, so colours, fills, marker shapes, line types, names and font are
+  exactly those drawn, and it follows the current sample names, colours and
+  selection: rename a condition or hide a sample and the key changes with
+  the figure. Figures that hide their legend on purpose (sample names already
+  on the x axis) still get a key. The standalone download and the embedded
+  version are produced by the same function, so they match exactly.
+- **Legend text starter.** One clause per legend, in words:
+  "Condition: Uninfected (blue); +N4 (vermillion). Replicate: 1 (filled
+  circles); 2 (filled triangles); 3 (filled squares)." Colour words come from
+  the nearest of a small named set (Okabe-Ito names included), shape words
+  from the plotting-symbol table; continuous scales read as "colour scale from
+  white (0) to vermillion (10)". When the colour-vision preview is on, the
+  sentence says the words describe simulated colours.
+- **Place on the figure.** Moves the legend inside the panel, top-left, on a
+  translucent white box. The composite figure keeps its shared legend along
+  the bottom instead (a collected legend cannot be placed inside), and its
+  control says so.
+- **Bundles.** The PPTX panel deck gets one more slide, "Legend key", as
+  editable vector graphics. `save_figure()` now draws legend grobs as well as
+  plots, including in the PPTX branch.
+- Covered: Distributions, Trajectories, Thresholds, Effect Sizes, Morphospace
+  scatter, Phenotype composition, Multi-Feature heatmap, Cell Metrics and the
+  composite. Not yet: the secondary figures (PCA loadings, scree and
+  diversity, raw heatmap, radar, trend, EMM, power).
+- The embed switch is part of the saved figure settings and of "Apply to all
+  tabs". Tests in `tests/testthat/test-legend-key.R`.
+
 ## 3.4.0 — 2026-11-04
 
 **Analysis and data release.** Three new analyses, all built on per-replicate
