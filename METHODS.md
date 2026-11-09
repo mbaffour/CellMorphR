@@ -117,6 +117,13 @@ this is the usual simplification for planning. Values are on the scale the
 Statistics tab uses, i.e. after any Data-tab transform. This is prospective
 planning; "observed power" of a completed comparison is not reported.
 
+**3e. Legend key.** The downloadable legend key is the figure's own ggplot2
+legend extracted from the rendered figure, not a redrawn approximation, so it
+reproduces the plotted colours, fills, marker shapes, line types, labels and
+font exactly; the on-figure version is the same legend repositioned inside the
+panel. The accompanying text describes each legend entry with the nearest
+named colour and the plotting-symbol name.
+
 **4. Export.** Figures are rendered with ggplot2 and exported at user-set
 dimensions and resolution as PDF, SVG, TIFF, EPS, PNG, or as editable vector
 graphics in PowerPoint (officer/rvg), so text and shapes remain editable.
@@ -126,7 +133,7 @@ graphics in PowerPoint (officer/rvg), so text and shapes remain editable.
 ## Copy-paste Methods paragraph
 
 > Single-cell morphometric data were visualized and analyzed in CellMorphR
-> v3.4.0 (Awuah, M.B.; https://github.com/mbaffour/CellMorphR), an R (v4.6.0)
+> v3.5.0 (Awuah, M.B.; https://github.com/mbaffour/CellMorphR), an R (v4.6.0)
 > Shiny application built on ggplot2. Distributions of single-cell
 > measurements were plotted per condition and timepoint as violin (kernel
 > density) plots with individual biological-replicate summary values (median
