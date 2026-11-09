@@ -4,6 +4,40 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.8.0 — 2026-11-09
+
+**Legend tab, fuller legend drafts, report workbook, unit picker.**
+
+- **Legend tab** (after Pub Figure): one card per main figure with its legend
+  key drawn live, its complete legend draft, and a Download Key button in a
+  chosen format; **Download All Legend Drafts (.txt)** writes every draft to
+  one file. Key and draft come from the same reactives as the figure tabs, so
+  the two can never differ. Figures not yet generated on their own tab say so.
+- **Legend drafts now also state** what the marks are (one sentence per plot
+  type: violins are kernel-density outlines of single-cell values, each point
+  is one biological replicate, hexagons are shaded by cell count, and so on)
+  and what data is shown: cells, conditions shown out of the total (named when
+  filtered), timepoints shown out of the total, biological replicates per
+  group, the source file name, the app version and the date. On Distributions
+  the counts follow the sample and timepoint filters, so a filtered figure
+  says "2 of 4 conditions shown (Uninfected, Phage_MOI_10)".
+- **Report workbook (.xlsx)**, from the Data tab, Cell Metrics tab and Legend
+  tab: README (version, date, source, cells, conditions, timepoints,
+  replicates per group, transform, units per measurement, reference, test,
+  correction, comparison mode, statistical unit), Cell_metrics for **every**
+  measurement as one long table, Replicate_summaries, Condition_summaries,
+  Pairwise_stats, Thresholds, Power_plan, Colour_map and Legend_drafts.
+  Tables not yet computed say so in their sheet. Falls back to a CSV of the
+  cell metrics when `writexl` is missing.
+- **Unit picker.** The measurement unit is now a dropdown of common
+  microscopy units (µm, µm², µm³, nm, mm, px, px², a.u., %, ratio, degrees,
+  fold) that also accepts anything typed; still remembered per measurement
+  and restored with sessions. Pixel-to-micron conversion of the data itself
+  is **not** included: it would rewrite values upstream of every analysis and
+  deserves its own, deliberate feature.
+- The source file name is now recorded (file, demo, or session) for legends
+  and the report, and saved with the session.
+
 ## 3.7.0 — 2026-11-09
 
 **The legend text is now a whole legend draft.** The box under each figure's
