@@ -66,3 +66,27 @@ test_that("legend_key_plot re-enables hidden discrete legends and leaves continu
   sz <- legend_key_size(g)
   expect_true(sz$w > 0.5 && sz$w < 5 && sz$h > 0.3 && sz$h < 5)
 })
+
+test_that("legend_draft_text assembles measurement, key, subtitle and caption into sentences", {
+  expect_equal(tidy_sentence("violins = cell distributions;\ndots = replicate means"), "Violins = cell distributions; dots = replicate means.")
+  expect_equal(tidy_sentence("Already a sentence."), "Already a sentence.")
+  expect_length(tidy_sentence(NULL), 0); expect_length(tidy_sentence("  "), 0)
+  d <- data.frame(x = rep(1:3, 2), y = 1:6, Condition = rep(c("Ctrl", "Trt"), each = 3))
+  p <- ggplot(d, aes(x, y, colour = Condition)) + geom_point() +
+    scale_colour_manual(values = c(Ctrl = "#0072B2", Trt = "#D55E00")) +
+    labs(subtitle = "each point = one replicate median (N = 3 per group); bars = SEM of replicate medians",
+         caption = "Welch's t-test on replicate medians, Holm-corrected.")
+  txt <- legend_draft_text(p, measurement = "Area (um2), log-transformed")
+  expect_equal(txt, paste("Measurement: Area (um2), log-transformed.",
+                          "Condition: Ctrl (blue); Trt (vermillion).",
+                          "Each point = one replicate median (N = 3 per group); bars = SEM of replicate medians.",
+                          "Welch's t-test on replicate medians, Holm-corrected."))
+  # colour-vision note is added once, and not again when the caption already carries it
+  expect_match(legend_draft_text(p, cvd = "deuteranopia"), "simulated for deuteranopia")
+  p2 <- p + labs(caption = "Colours simulated for deuteranopia (preview, not the chosen palette).")
+  expect_equal(length(gregexpr("simulated for", legend_draft_text(p2, cvd = "deuteranopia"))[[1]]), 1)
+  # no measurement, no subtitle: just the key
+  expect_equal(legend_draft_text(ggplot(d, aes(x, y, colour = Condition)) + geom_point() +
+                                   scale_colour_manual(values = c(Ctrl = "#0072B2", Trt = "#D55E00"))),
+               "Condition: Ctrl (blue); Trt (vermillion).")
+})
