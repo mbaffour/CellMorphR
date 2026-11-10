@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.10.0"
+APP_VERSION <- "3.11.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -2226,6 +2226,21 @@ download_row_ui <- function(prefix, id, label = "Download Figure") {
   )
 }
 
+# Statistics downloads: the whole analysis as one workbook, plus the two tables
+# people paste most (descriptive, pairwise) as CSV and the plain-text report.
+# The same block sits in the sidebar and under the Descriptive, Results and
+# Pairwise panels, so it is found wherever the result is being read; `where`
+# keeps the button ids distinct.
+stats_download_ui <- function(where, compact = FALSE) {
+  cls <- if (compact) "btn-sm btn-outline-primary" else "btn-outline-primary w-100"
+  cls2 <- if (compact) "btn-sm btn-outline-secondary" else "btn-outline-secondary w-100 mt-2"
+  tags$div(class = if (compact) "p-2 d-flex flex-wrap gap-2" else NULL,
+    downloadButton(paste0("dl_stats_xlsx_", where), "Download Analysis Workbook (.xlsx)", class = cls),
+    downloadButton(paste0("dl_stats_desc_", where), "Descriptive Stats (CSV)", class = cls2),
+    downloadButton(paste0("dl_stats_pairwise_", where), "Pairwise Results (CSV)", class = cls2),
+    downloadButton(paste0("dl_stats_report_", where), "Full Report (.txt)", class = cls2))
+}
+
 # Legend key for the secondary figures (loadings, scree, radar, trend, ...):
 # the same switch, draft and download the main figures carry in their sidebar,
 # folded under the plot so the tab stays uncluttered. The key's file format,
@@ -3229,16 +3244,19 @@ ui <- page_navbar(
         tags$hr(),
         actionButton("run_stats", "Run Flexible Statistics", class = "btn-primary w-100", icon = icon("play")),
         tags$hr(),
-        downloadButton("dl_stats", "Download Results", class = "btn-outline-primary w-100"),
-        downloadButton("dl_stats_csv", "Download Pairwise CSV", class = "btn-outline-secondary w-100 mt-2")
+        tags$p(tags$strong("Download"), class = "mb-1"),
+        stats_download_ui("side"),
+        tags$p(class = "small text-muted mt-1", style = "font-size:10px;",
+          "The workbook holds every table of the analysis on its own sheet: settings, descriptive statistics, pairwise tests, ",
+          "the global model, effect sizes, estimated marginal means, diagnostics, replicate summaries and the report text.")
       ),
       navset_card_tab(
         nav_panel("Group Preview", DTOutput("stat_group_preview_table")),
         nav_panel("Comparison Preview", DTOutput("comparison_preview_table")),
         nav_panel("Test Suggestion", verbatimTextOutput("test_suggestion_output"), DTOutput("test_suggestion_group_table")),
-        nav_panel("Descriptive", DTOutput("stat_descriptive_table")),
-        nav_panel("Results", verbatimTextOutput("stat_output")),
-        nav_panel("Pairwise", DTOutput("pairwise_table")),
+        nav_panel("Descriptive", DTOutput("stat_descriptive_table"), stats_download_ui("desc", compact = TRUE)),
+        nav_panel("Results", verbatimTextOutput("stat_output"), stats_download_ui("res", compact = TRUE)),
+        nav_panel("Pairwise", DTOutput("pairwise_table"), stats_download_ui("pw", compact = TRUE)),
         nav_panel("Trend",
           tags$div(class = "p-2",
             layout_columns(col_widths = c(4, 4, 4),
@@ -4037,7 +4055,11 @@ server <- function(input, output, session) {
       "Cell_metrics"         = cell_metrics,
       "Replicate_summaries"  = rep_summ_all,
       "Condition_summaries"  = cond_summ_all,
+      "Descriptive_stats"    = as_sheet(stat_results()$descriptive, "Not computed: run the Statistics tab first"),
       "Pairwise_stats"       = as_sheet(stat_results()$pairwise, "Not computed: run the Statistics tab first"),
+      "Global_model"         = if (!is.null(stat_results())) stat_sheets(stat_results())$Global_model else as_sheet(NULL, "Not computed: run the Statistics tab first"),
+      "Effect_sizes"         = as_sheet(stat_results()$partial_eta2, "Not computed: needs the repeated-measures ANOVA on the Statistics tab"),
+      "EMMs"                 = as_sheet(stat_results()$emm_summary, "Not computed: needs the linear mixed model on the Statistics tab"),
       "Thresholds"           = as_sheet(frac_table_data(), "Not computed: open the Thresholds tab first"),
       "Power_plan"           = as_sheet(power_plan(), "Not computed"),
       "Colour_map"           = as_sheet(colour_table()),
@@ -6689,23 +6711,79 @@ server <- function(input, output, session) {
     filename = function() paste0("trend_", input$measure, ".csv"),
     content = function(file) write.csv(trend_results()$table, file, row.names = FALSE))
 
-  output$dl_stats <- downloadHandler(
-    filename = function() paste0("stats_", input$stat_measure %||% input$measure, "_", Sys.Date(), ".txt"),
-    content  = function(file) {
-      r <- stat_results(); sink(file)
-      cat("CellMorphR ", APP_VERSION, " -- Flexible Statistical Results\n", sep = "")
-      cat("Date:", as.character(Sys.time()), "\n\n")
-      print_stat_report(r, include_tables = TRUE)
-      sink()
-    })
-
-  output$dl_stats_csv <- downloadHandler(
-    filename = function() paste0("pairwise_stats_", input$stat_measure %||% input$measure, "_", Sys.Date(), ".csv"),
-    content  = function(file) {
-      r <- stat_results()
-      out <- if (!is.null(r$pairwise)) r$pairwise else data.frame()
-      write.csv(out, file, row.names = FALSE)
-    })
+  # --- Statistics downloads -------------------------------------------------
+  # Every table the analysis produced, as plain data frames, one per sheet.
+  # Objects that are not tables (the fitted model, emmeans objects) are
+  # summarised into tables; text results become one-row-per-line sheets.
+  stat_sheets <- function(r) {
+    lines_df <- function(txt) data.frame(Text = unlist(strsplit(paste(txt, collapse = "\n"), "\n", fixed = TRUE)), stringsAsFactors = FALSE)
+    with_term <- function(d) { d <- as.data.frame(d); if (!is.null(rownames(d)) && !"Term" %in% names(d)) d <- cbind(Term = rownames(d), d); rownames(d) <- NULL; d }
+    settings <- data.frame(
+      Field = c("App version", "Generated", "Method", "Measurement", "Transform", "Grouping variables", "Comparison mode",
+                "Reference group", "Statistical unit", "Pairwise test", "P-value correction", "Multiplicity family", "Global model"),
+      Value = c(APP_VERSION, format(Sys.time()), r$method %||% "", r$measurement %||% "", r$transform_label %||% "none (raw values)",
+                paste(r$grouping_variables %||% "Condition", collapse = ", "), paste(c(r$comparison_mode, r$comparison_mode_message), collapse = " -- "),
+                as.character(r$reference_group %||% ""), r$statistical_unit %||% r$yvar_used %||% "", r$test %||% "", r$p_adjust %||% "",
+                r$pairwise_family %||% "", r$global_model_kind %||% (input$stat_method %||% "")),
+      stringsAsFactors = FALSE)
+    rm_tbl <- if (is.list(r$global_model)) r$global_model$table else NULL   # the LMM branch stores no table here
+    global <- if (!is.null(rm_tbl)) as.data.frame(rm_tbl)
+      else if (!is.null(r$anova_summary)) with_term(r$anova_summary)
+      else data.frame(Note = r$global_model_message %||% "Global model not run", stringsAsFactors = FALSE)
+    list(
+      "Settings"            = settings,
+      "Descriptive"         = as_sheet(r$descriptive, "No descriptive table"),
+      "Pairwise"            = as_sheet(r$pairwise, "No pairwise tests (see Pairwise_EMM)"),
+      "Global_model"        = as_sheet(global),
+      "Effect_sizes"        = as_sheet(r$partial_eta2, "Not available (needs the repeated-measures ANOVA)"),
+      "EMMs"                = as_sheet(r$emm_summary, "Not available (needs the linear mixed model)"),
+      "Pairwise_EMM"        = as_sheet(if (is.data.frame(r$pairwise_emm)) r$pairwise_emm else if (!is.null(r$pairwise_emm)) as.data.frame(summary(r$pairwise_emm)) else NULL,
+                                       "Not available (needs the linear mixed model)"),
+      "Random_effects"      = as_sheet(r$ranef_var, "Not available (needs the linear mixed model)"),
+      "Diagnostics"         = lines_df(format_assumption_diagnostics(r$diagnostics)),
+      "Test_suggestion"     = lines_df(r$test_suggestion$summary %||% "No suggestion was generated"),
+      "Replicate_summaries" = as_sheet(r$replicate_summary, "No replicate summaries"),
+      "Comparison_preview"  = as_sheet(r$comparison_preview, "No comparisons"),
+      "Report"              = lines_df(utils::capture.output(print_stat_report(r, include_tables = FALSE)))
+    )
+  }
+  stats_file_stem <- function() paste0("stats_", gsub("[^A-Za-z0-9_.-]+", "_", input$stat_measure %||% input$measure %||% "analysis"), "_", Sys.Date())
+  write_stats_workbook <- function(file) {
+    r <- stat_results(); validate(need(!is.null(r), "Run Flexible Statistics first."))
+    sheets <- stat_sheets(r)
+    if (has_writexl) return(writexl::write_xlsx(sheets, path = file))
+    # No writexl: one CSV per sheet, zipped.
+    dir <- tempfile("stats_"); dir.create(dir)
+    for (nm in names(sheets)) write.csv(sheets[[nm]], file.path(dir, paste0(nm, ".csv")), row.names = FALSE)
+    if (requireNamespace("zip", quietly = TRUE)) zip::zip(file, files = list.files(dir), root = dir, mode = "cherry-pick")
+    else { od <- setwd(dir); on.exit(setwd(od), add = TRUE); utils::zip(file, files = list.files(dir), flags = "-q") }
+  }
+  write_stats_report <- function(file) {
+    r <- stat_results(); validate(need(!is.null(r), "Run Flexible Statistics first."))
+    sink(file); on.exit(sink(), add = TRUE)
+    cat("CellMorphR ", APP_VERSION, " -- Flexible Statistical Results\n", sep = "")
+    cat("Date:", as.character(Sys.time()), "\n\n")
+    print_stat_report(r, include_tables = TRUE)
+  }
+  # The same four downloads are offered in the sidebar and under each results panel.
+  for (where in c("side", "desc", "res", "pw")) local({
+    w <- where
+    output[[paste0("dl_stats_xlsx_", w)]] <- downloadHandler(
+      filename = function() paste0(stats_file_stem(), if (has_writexl) ".xlsx" else ".zip"),
+      content = write_stats_workbook)
+    output[[paste0("dl_stats_desc_", w)]] <- downloadHandler(
+      filename = function() paste0("descriptive_", stats_file_stem(), ".csv"),
+      content = function(file) { r <- stat_results(); validate(need(!is.null(r$descriptive), "Run Flexible Statistics first."))
+        write.csv(as_sheet(r$descriptive), file, row.names = FALSE) })
+    output[[paste0("dl_stats_pairwise_", w)]] <- downloadHandler(
+      filename = function() paste0("pairwise_", stats_file_stem(), ".csv"),
+      content = function(file) { r <- stat_results(); validate(need(!is.null(r), "Run Flexible Statistics first."))
+        out <- if (!is.null(r$pairwise)) r$pairwise else if (is.data.frame(r$pairwise_emm)) r$pairwise_emm else data.frame()
+        write.csv(as_sheet(out, "No pairwise results"), file, row.names = FALSE) })
+    output[[paste0("dl_stats_report_", w)]] <- downloadHandler(
+      filename = function() paste0(stats_file_stem(), ".txt"),
+      content = write_stats_report)
+  })
 
   # === EFFECT SIZES TAB ===
   es_data <- reactive({

@@ -4,6 +4,24 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.11.0 — 2026-11-10
+
+**Statistics downloads: the whole analysis as one workbook.**
+
+- **Download Analysis Workbook (.xlsx)** on the Statistics tab: every table
+  the analysis produced, one sheet each -- Settings, Descriptive, Pairwise,
+  Global_model (repeated-measures ANOVA table or mixed-model ANOVA),
+  Effect_sizes (partial eta-squared), EMMs, Pairwise_EMM, Random_effects,
+  Diagnostics, Test_suggestion, Replicate_summaries, Comparison_preview and
+  the Report text. Without the writexl package it is a ZIP of CSVs.
+- **Descriptive Stats (CSV)** is a download of its own, next to **Pairwise
+  Results (CSV)** and **Full Report (.txt)** (the former Download Results and
+  Download Pairwise CSV buttons).
+- The same four buttons sit in the sidebar and under the Descriptive, Results
+  and Pairwise panels, so they are where the result is being read.
+- The **report workbook** (Data, Cell Metrics and Legend tabs) gains
+  Descriptive_stats, Global_model, Effect_sizes and EMMs sheets.
+
 ## 3.10.0 — 2026-11-09
 
 **Legend key on every figure; Trend, Power and EMM downloads in any format.**
