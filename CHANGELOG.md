@@ -4,6 +4,37 @@ All notable changes to CellMorphR are recorded here. Versions before 3.2.0 were
 not changelogged; for those, see the version table in the
 [README](README.md#overview) and the commit history.
 
+## 3.10.0 — 2026-11-09
+
+**Legend key on every figure; Trend, Power and EMM downloads in any format.**
+
+- **Legend key for the secondary figures.** The twelve figures that had none
+  now carry the same legend key as the main figures: PCA loadings, morphospace
+  trajectory, morphospace diversity and scree; optimal k and morphospace by
+  phenotype; raw heatmap, spider/radar and feature importance; dose-response
+  trend, estimated marginal means and power curves. Each has a collapsed
+  **Legend key** panel under its plot with the on-figure switch, the legend
+  draft and **Download Legend Key** (in the tab's export format, size and DPI).
+  The key is cut from the live figure, so it follows renamed conditions,
+  colours and selection. Figures with nothing mapped to colour, shape or line
+  type (scree, optimal k, trend) say so and still get a draft.
+- **Legend tab** lists all 21 figures (main first), and **Download All Legend
+  Drafts** and the report workbook's Legend_drafts sheet include them.
+- **Drafts name the right measurement.** The trend and EMM figures are
+  snapshots from when their analysis was run; their drafts name the
+  measurement they were run on, not the one currently selected.
+- **Trend, Power and EMM figures** now have the format dropdown beside their
+  Download button (PDF, PNG, SVG, TIFF, EPS, editable PPTX). The trend figure
+  was PDF-only and the power figure had no download.
+- **Two-panel figures share one key.** The diversity figure's two panels now
+  share one collected legend instead of drawing it twice; with the embed
+  switch on, the key sits inside the first panel. The loadings figure's bar
+  colour (loading sign) is keyed and legended the same way.
+- **Colourblind-safe phenotypes and effects.** Phenotype clusters (composition
+  and morphospace-by-phenotype) and the importance figure's ANOVA terms use
+  the Okabe-Ito palette instead of ggplot's default hues.
+- **Optimal k** says plainly when k was set manually instead of showing nothing.
+
 ## 3.9.0 — 2026-11-09
 
 **Downloads: format beside the button, batch export, EPS fix.**

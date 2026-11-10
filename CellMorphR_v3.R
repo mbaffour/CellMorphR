@@ -33,7 +33,7 @@ library(scales)
 if (!exists("%||%", mode = "function")) `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Single source of truth for the app version (navbar, hero, footer, session files)
-APP_VERSION <- "3.9.0"
+APP_VERSION <- "3.10.0"
 
 # Attempt to load optional packages
 has_lme4     <- requireNamespace("lme4", quietly = TRUE)
@@ -710,8 +710,36 @@ PLOT_DESCRIPTIONS <- c(
   "cm:heatmap"       = "Cells of the heatmap show the chosen summary of all cells in each group",
   "cm:bubble"        = "Bubble position shows the chosen summary and bubble size the chosen second metric",
   "cm:radar"         = "Each polygon shows the mean of every measurement for one condition, scaled per axis",
-  "pub"              = "Composite of the selected panels; see the panel sentences"
+  "pub"              = "Composite of the selected panels; see the panel sentences",
+  # secondary figures (3.10.0)
+  "pca_loadings"     = "Bars show the loading (weight) of each measurement on the principal component; bar colour gives the sign",
+  "pca_traj"         = "Points are the centroid of each condition's cells in PC1-PC2 space at each timepoint, connected in time order",
+  "pca_diversity"    = "Bars show the convex-hull area and the mean distance to the centroid of each condition's cells in PC1-PC2 space, per timepoint",
+  "pca_scree"        = "Bars show the percentage of total variance explained by each principal component",
+  "clust_k"          = "Points show the mean silhouette width for each number of clusters k; the dashed line marks the k used",
+  "clust_pca"        = "Each point is one cell placed by its first two principal-component scores, coloured by its phenotype cluster",
+  "mf_raw"           = "Cells of the heatmap show the mean across replicates of each replicate's summary of the measurement in each group",
+  "mf_radar"         = "Each polygon shows the mean across replicates of each replicate's summary of every measurement for one condition, scaled 0-1 per axis",
+  "mf_importance"    = "Bars show the partial eta-squared of each repeated-measures ANOVA term for each measurement",
+  "trend"            = "Each point is one biological replicate's summary value against the numeric predictor; the line is the linear fit",
+  "emm"              = "Points are the estimated marginal means from the mixed model, with 95% confidence intervals",
+  "power"            = "Curves show the power to detect the target difference as the number of biological replicates per group grows"
 )
+
+# Every figure that carries a legend key, by its input prefix, in Legend-tab
+# order: the main figures first, then the secondary figures of the Morphospace,
+# Phenotypes, Statistics and Multi-Feature tabs.
+LEGEND_FIGURE_TITLES <- c(
+  dist = "Distributions", traj = "Trajectories", frac = "Thresholds", es = "Effect Sizes",
+  pca = "Morphospace", clust = "Phenotype Composition", mf = "Multi-Feature Heatmap",
+  cm = "Cell Metrics", pub = "Composite Figure",
+  pca_loadings = "PCA Loadings", pca_traj = "Morphospace Trajectory", pca_diversity = "Morphospace Diversity",
+  pca_scree = "Scree Plot", clust_k = "Optimal k", clust_pca = "Morphospace by Phenotype",
+  mf_raw = "Raw Heatmap", mf_radar = "Spider/Radar Plot", mf_importance = "Feature Importance",
+  trend = "Dose-Response Trend", emm = "Estimated Marginal Means", power = "Power Curves")
+# Figures that draw several measurements at once, so the draft names none.
+LEGEND_MULTI_MEASURE <- c("mf", "pca", "clust", "pca_loadings", "pca_traj", "pca_diversity", "pca_scree",
+                          "clust_k", "clust_pca", "mf_raw", "mf_radar", "mf_importance")
 plot_description <- function(prefix, type = NULL) {
   key <- if (!is.null(type) && nzchar(type)) paste0(prefix, ":", type) else prefix
   d <- PLOT_DESCRIPTIONS[key]
@@ -2198,6 +2226,19 @@ download_row_ui <- function(prefix, id, label = "Download Figure") {
   )
 }
 
+# Legend key for the secondary figures (loadings, scree, radar, trend, ...):
+# the same switch, draft and download the main figures carry in their sidebar,
+# folded under the plot so the tab stays uncluttered. The key's file format,
+# size and DPI come from the tab's own Download row and Export Settings.
+legend_key_inline_ui <- function(prefix) {
+  tags$details(class = "legend-key-inline small mx-2 mb-2",
+    tags$summary(class = "fw-bold", "Legend key"),
+    checkboxInput(paste0(prefix, "_legend_embed"), "Place legend key on the figure (top-left corner)", FALSE),
+    tags$label("Legend draft (copy into your figure legend)", class = "small fw-bold"),
+    verbatimTextOutput(paste0(prefix, "_legend_text"), placeholder = TRUE),
+    downloadButton(paste0("dl_", prefix, "_legend_key"), "Download Legend Key", class = "btn-sm btn-outline-primary"))
+}
+
 # Helper: get theme from shared controls
 # Reads base + per-element typography overrides from input[[prefix_*]] inputs
 get_theme <- function(input, prefix) {
@@ -3029,19 +3070,23 @@ ui <- page_navbar(
           edit_hint_ui()),
         nav_panel("Loadings",
           plotOutput("pca_loadings_bar", height = "500px"),
-          downloadButton("dl_pca_loadings", "Download Loadings Figure", class = "btn-sm btn-outline-primary m-2")),
-        nav_panel("Trajectories", plotOutput("pca_trajectory", height = "500px")),
+          downloadButton("dl_pca_loadings", "Download Loadings Figure", class = "btn-sm btn-outline-primary m-2"),
+          legend_key_inline_ui("pca_loadings")),
+        nav_panel("Trajectories", plotOutput("pca_trajectory", height = "500px"),
+          legend_key_inline_ui("pca_traj")),
         nav_panel("Diversity",
           layout_columns(col_widths = c(12),
             card(card_header("Morphological Diversity Metrics"), DTOutput("pca_diversity_table")),
             card(card_header("PC Variance by Group"), plotOutput("pca_diversity_plot", height = "350px"),
-                 downloadButton("dl_pca_diversity", "Download Diversity Figure", class = "btn-sm btn-outline-primary m-2"))
+                 downloadButton("dl_pca_diversity", "Download Diversity Figure", class = "btn-sm btn-outline-primary m-2"),
+                 legend_key_inline_ui("pca_diversity"))
           )
         ),
         nav_panel("Scree",
           layout_columns(col_widths = c(6, 6),
             card(card_header("Variance Explained"), plotOutput("pca_scree", height = "300px"),
-                 downloadButton("dl_pca_scree", "Download Scree Figure", class = "btn-sm btn-outline-primary m-2")),
+                 downloadButton("dl_pca_scree", "Download Scree Figure", class = "btn-sm btn-outline-primary m-2"),
+                 legend_key_inline_ui("pca_scree")),
             card(card_header("Loadings Table"), DTOutput("pca_loadings_table"))
           )
         ),
@@ -3090,9 +3135,11 @@ ui <- page_navbar(
         nav_panel("Clusters",
           layout_columns(col_widths = c(6, 6),
             card(card_header("Optimal k"), plotOutput("clust_k_plot", height = "300px"),
-                 downloadButton("dl_clust_k", "Download", class = "btn-sm btn-outline-primary m-2")),
+                 downloadButton("dl_clust_k", "Download", class = "btn-sm btn-outline-primary m-2"),
+                 legend_key_inline_ui("clust_k")),
             card(card_header("Morphospace by Phenotype"), plotOutput("clust_pca_plot", height = "300px"),
-                 downloadButton("dl_clust_pca", "Download", class = "btn-sm btn-outline-primary m-2"))
+                 downloadButton("dl_clust_pca", "Download", class = "btn-sm btn-outline-primary m-2"),
+                 legend_key_inline_ui("clust_pca"))
           )
         ),
         nav_panel("Composition",
@@ -3206,10 +3253,9 @@ ui <- page_navbar(
               "This asks 'does the measurement change along the gradient?' -- usually far more powerful than dozens of pairwise tests, ",
               "especially with few biological replicates. Use 'Split Condition' on the Data tab to extract a numeric dose column first if needed."),
             plotOutput("trend_plot", height = "380px"),
-            layout_columns(col_widths = c(6, 6),
-              downloadButton("dl_trend_plot", "Download Trend Figure", class = "btn-outline-primary w-100"),
-              downloadButton("dl_trend_csv", "Download Trend Table (CSV)", class = "btn-outline-secondary w-100")
-            ),
+            legend_key_inline_ui("trend"),
+            download_row_ui("trend", "dl_trend_plot", "Download Trend Figure"),
+            downloadButton("dl_trend_csv", "Download Trend Table (CSV)", class = "btn-outline-secondary w-100 mb-2"),
             DTOutput("trend_table")
           )
         ),
@@ -3231,19 +3277,16 @@ ui <- page_navbar(
             ),
             uiOutput("power_scale_txt"),
             plotOutput("power_plot", height = "360px"),
+            legend_key_inline_ui("power"),
+            download_row_ui("power", "dl_power_plot", "Download Power Figure"),
             DTOutput("power_table"),
             downloadButton("dl_power_csv", "Download Power Table (CSV)", class = "btn-outline-secondary w-100 mt-2")
           )
         ),
         nav_panel("EMM Plot",
           plotOutput("emm_plot", height = "450px"),
-          tags$div(class = "p-2",
-            layout_columns(col_widths = c(4, 8),
-              selectInput("emm_format", "Format",
-                choices = c("PDF" = "pdf", "PNG" = "png", "SVG" = "svg", "PPTX (editable)" = "pptx"), selected = "pdf"),
-              downloadButton("dl_emm_plot", "Download EMM Figure", class = "btn-outline-primary w-100 mt-4")
-            )
-          )
+          legend_key_inline_ui("emm"),
+          tags$div(class = "p-2", download_row_ui("emm", "dl_emm_plot", "Download EMM Figure"))
         ),
         nav_panel("About", tags$div(class = "p-3 small",
           tags$h6("Understanding the Statistical Analysis"),
@@ -3358,11 +3401,12 @@ ui <- page_navbar(
         nav_panel("Stat Heatmap",
           uiOutput("mf_heatmap_ui"),
           edit_hint_ui()),
-        nav_panel("Raw Heatmap", plotOutput("mf_raw_heatmap", height = "500px")),
-        nav_panel("Spider/Radar", plotOutput("mf_radar_plot", height = "550px")),
+        nav_panel("Raw Heatmap", plotOutput("mf_raw_heatmap", height = "500px"), legend_key_inline_ui("mf_raw")),
+        nav_panel("Spider/Radar", plotOutput("mf_radar_plot", height = "550px"), legend_key_inline_ui("mf_radar")),
         nav_panel("Importance",
           plotOutput("mf_importance", height = "400px"),
-          downloadButton("dl_mf_importance", "Download Importance Figure", class = "btn-sm btn-outline-primary m-2")),
+          downloadButton("dl_mf_importance", "Download Importance Figure", class = "btn-sm btn-outline-primary m-2"),
+          legend_key_inline_ui("mf_importance")),
         nav_panel("Divergence", DTOutput("mf_divergence_table")),
         nav_panel("Full Table", DTOutput("mf_results_table"))
       )
@@ -3501,11 +3545,12 @@ ui <- page_navbar(
     tags$div(class = "p-3",
       layout_columns(col_widths = c(8, 4),
         tags$div(
-          tags$h5("Legend keys and drafts for every main figure"),
+          tags$h5("Legend keys and drafts for every figure"),
           tags$p(class = "small text-muted",
             "Each key is the figure's own legend and each draft is built from the figure's live settings: what the marks are, the measurement, the key, ",
             "the statistic, N, error measure, normalisation or threshold, the test, and the data behind it. Change a figure and its entry here changes with it. ",
-            "Figures that have not been generated on their own tab (Multi-Feature needs its analysis run) say so.")
+            "Figures that have not been generated on their own tab (Multi-Feature needs its analysis run) say so. ",
+            "The main figures come first, then the secondary figures of the Morphospace, Phenotypes, Statistics and Multi-Feature tabs.")
         ),
         tags$div(
           selectInput("legend_tab_format", "Key file format",
@@ -3514,10 +3559,8 @@ ui <- page_navbar(
           downloadButton("dl_report_xlsx_legend", "Download Report Workbook (.xlsx)", class = "btn-outline-primary w-100 mt-2")
         )
       ),
-      lapply(c("dist", "traj", "frac", "es", "pca", "clust", "mf", "cm", "pub"), function(pf) {
-        title <- c(dist = "Distributions", traj = "Trajectories", frac = "Thresholds", es = "Effect Sizes",
-                   pca = "Morphospace", clust = "Phenotype Composition", mf = "Multi-Feature Heatmap",
-                   cm = "Cell Metrics", pub = "Composite Figure")[[pf]]
+      lapply(names(LEGEND_FIGURE_TITLES), function(pf) {
+        title <- LEGEND_FIGURE_TITLES[[pf]]
         card(class = "mt-3", card_header(title),
           layout_columns(col_widths = c(3, 9),
             tags$div(plotOutput(paste0("legend_tab_key_", pf), height = "220px"),
@@ -3823,9 +3866,10 @@ server <- function(input, output, session) {
   # Everything is derived from the live plot reactive, so renamed conditions,
   # changed colours or a different sample selection show up at once.
   legend_key_grobs <- list(); legend_plot_fns <- list(); legend_drafts <- list()
-  LEGEND_FIGURES <- c(dist = "Distributions", traj = "Trajectories", frac = "Thresholds", es = "Effect Sizes",
-                      pca = "Morphospace", clust = "Phenotype Composition", mf = "Multi-Feature Heatmap",
-                      cm = "Cell Metrics", pub = "Composite Figure")
+  LEGEND_FIGURES <- LEGEND_FIGURE_TITLES
+  # Secondary figures have no apply_custom_labs(); their embed switch is applied
+  # at the tail of their own reactive, so render, download and key all agree.
+  embed_key <- function(prefix, p) if (isTRUE(input[[paste0(prefix, "_legend_embed")]])) legend_key_plot(p, inside = TRUE) else p
 
   # The "what data" sentence for one figure: what it shows, out of what.
   legend_data_for <- function(prefix) {
@@ -3853,6 +3897,12 @@ server <- function(input, output, session) {
                          source = data_source_name(), version = APP_VERSION, date = format(Sys.Date()))
   }
 
+  stored_measure <- function(sm, m, unit_txt, tr_txt) {
+    if (is.null(sm) || !nzchar(sm)) return(NULL)
+    if (identical(sm, m)) return(paste0(sm, unit_txt, tr_txt))
+    u <- measure_units[[sm]]
+    paste0(sm, if (!is.null(u) && nzchar(u)) paste0(" (", u, ")") else "", tr_txt)
+  }
   legend_draft_for <- function(prefix) {
     p <- legend_plot_fns[[prefix]](); req(!is.null(p))
       m <- current_measure(); tr <- input$data_transform %||% "none"
@@ -3864,7 +3914,11 @@ server <- function(input, output, session) {
       meas <- if (is.null(m)) NULL
         else if (prefix == "frac") paste0(m, unit_txt, ", raw values")
         else if (prefix == "traj" && isTRUE(tryCatch(traj_data()$on_raw, error = function(e) FALSE))) paste0(m, unit_txt, ", raw values (normalised to baseline)")
-        else if (prefix %in% c("mf", "pca", "clust")) NULL   # several measurements at once
+        else if (prefix %in% LEGEND_MULTI_MEASURE) NULL   # several measurements at once
+        # Trend and EMM figures are snapshots taken when their analysis was run:
+        # name the measurement they were run on, not the one now selected.
+        else if (prefix == "trend") stored_measure(tryCatch(trend_results()$measure, error = function(e) NULL), m, unit_txt, tr_txt)
+        else if (prefix == "emm") stored_measure(tryCatch(stat_results()$measurement, error = function(e) NULL), m, unit_txt, tr_txt)
         else paste0(m, unit_txt, tr_txt)
       # The composite's panels carry no subtitles, so describe each panel here.
       extra <- NULL
@@ -3894,7 +3948,10 @@ server <- function(input, output, session) {
       if (!nzchar(txt)) "This figure maps nothing to colour, fill, shape or line type." else txt
   }
 
-  register_legend_key <- function(prefix, plot_fn) {
+  # export_prefix: whose _format / _dpi / _transparent inputs the standalone key
+  # follows (a secondary figure uses its tab's). inline: the draft sits in a
+  # collapsed <details> under the plot, so it must render while hidden.
+  register_legend_key <- function(prefix, plot_fn, export_prefix = prefix, inline = FALSE) {
     legend_plot_fns[[prefix]] <<- plot_fn
     key_grob <- reactive({
       p <- plot_fn(); req(!is.null(p))
@@ -3904,6 +3961,7 @@ server <- function(input, output, session) {
     })
     legend_key_grobs[[prefix]] <<- key_grob
     output[[paste0(prefix, "_legend_text")]] <- renderText({ legend_draft_for(prefix) })
+    if (inline) outputOptions(output, paste0(prefix, "_legend_text"), suspendWhenHidden = FALSE)
     # Legend tab: the same key and the same draft, so the two can never differ.
     output[[paste0("legend_tab_key_", prefix)]] <- renderPlot({
       p <- tryCatch(plot_fn(), error = function(e) NULL)
@@ -3924,12 +3982,12 @@ server <- function(input, output, session) {
         save_figure(file, g, sz$w, sz$h, 300, input$legend_tab_format %||% "pdf")
       })
     output[[paste0("dl_", prefix, "_legend_key")]] <- downloadHandler(
-      filename = function() paste0("legend_key_", prefix, "_", input$measure %||% "figure", ".", fmt_ext(input[[paste0(prefix, "_format")]] %||% "pdf")),
+      filename = function() paste0("legend_key_", prefix, "_", input$measure %||% "figure", ".", fmt_ext(input[[paste0(export_prefix, "_format")]] %||% "pdf")),
       content = function(file) {
         g <- key_grob(); sz <- legend_key_size(g)
-        save_figure(file, g, sz$w, sz$h, input[[paste0(prefix, "_dpi")]] %||% 300,
-                    input[[paste0(prefix, "_format")]] %||% "pdf",
-                    transparent = isTRUE(input[[paste0(prefix, "_transparent")]]))
+        save_figure(file, g, sz$w, sz$h, input[[paste0(export_prefix, "_dpi")]] %||% 300,
+                    input[[paste0(export_prefix, "_format")]] %||% "pdf",
+                    transparent = isTRUE(input[[paste0(export_prefix, "_transparent")]]))
       })
   }
 
@@ -6240,9 +6298,13 @@ server <- function(input, output, session) {
            subtitle = "Two-sample t-test; between-replicate SD pooled from this dataset; dashed line = target power") +
       theme_publication(input$stat_base_size %||% 12)
     if (isTRUE(has_time())) p <- p + facet_wrap(~ Time_fac)
-    p
+    embed_key("power", p)
   })
+  register_legend_key("power", power_plot_obj, inline = TRUE)
   output$power_plot <- renderPlot({ power_plot_obj() })
+  output$dl_power_plot <- downloadHandler(
+    filename = function() paste0("power_", input$measure %||% "figure", ".", fmt_ext(input$power_format %||% "pdf")),
+    content = function(file) save_figure(file, power_plot_obj(), 9, 5.5, 300, input$power_format %||% "pdf"))
   output$dl_power_csv <- downloadHandler(
     filename = function() paste0("replicate_power_plan_", input$measure, ".csv"),
     content  = function(file) write.csv(power_plan(), file, row.names = FALSE))
@@ -6509,8 +6571,9 @@ server <- function(input, output, session) {
       labs(x = "Time", y = "Estimated Marginal Mean", title = "EMMs with 95% CI",
            subtitle = "From LMM; accounts for replicate random effects") +
       theme_publication(12)
-    wrap_legend_labels(p)
+    embed_key("emm", wrap_legend_labels(p))
   })
+  register_legend_key("emm", emm_plot_obj, inline = TRUE)
   output$emm_plot <- renderPlot({ emm_plot_obj() })
   output$dl_emm_plot <- downloadHandler(
     filename = function() paste0("emm_plot.", fmt_ext(input$emm_format %||% "pdf")),
@@ -6608,8 +6671,9 @@ server <- function(input, output, session) {
            subtitle = "Each point = one biological replicate; line = linear fit with 95% CI",
            caption = "Trend test on replicate summaries; Holm-corrected across strata.") +
       get_theme(input, "dist")
-    p
+    embed_key("trend", p)
   })
+  register_legend_key("trend", trend_plot_obj, inline = TRUE)
   output$trend_plot <- renderPlot({ trend_plot_obj() })
   output$trend_table <- renderDT({
     req(trend_results())
@@ -6619,8 +6683,8 @@ server <- function(input, output, session) {
       caption = "Linear trend of replicate summaries vs predictor, per stratum (Holm-adjusted)")
   })
   output$dl_trend_plot <- downloadHandler(
-    filename = function() paste0("trend_", input$measure, ".pdf"),
-    content = function(file) save_figure(file, trend_plot_obj(), 9, 6, 300, "pdf"))
+    filename = function() paste0("trend_", input$measure, ".", fmt_ext(input$trend_format %||% "pdf")),
+    content = function(file) save_figure(file, trend_plot_obj(), 9, 6, 300, input$trend_format %||% "pdf"))
   output$dl_trend_csv <- downloadHandler(
     filename = function() paste0("trend_", input$measure, ".csv"),
     content = function(file) write.csv(trend_results()$table, file, row.names = FALSE))
@@ -6829,10 +6893,12 @@ server <- function(input, output, session) {
     req(pca_result()); res <- pca_result(); req(res$ok)
     n <- min(ncol(res$var_explained), 10)
     vdf <- data.frame(PC = factor(paste0("PC", 1:n), levels = paste0("PC", 1:n)), Var = res$var_explained[2, 1:n] * 100)
-    ggplot(vdf, aes(x = PC, y = Var)) + geom_col(fill = "#3498DB", alpha = 0.8) +
+    p <- ggplot(vdf, aes(x = PC, y = Var)) + geom_col(fill = "#3498DB", alpha = 0.8) +
       geom_text(aes(label = paste0(round(Var, 1), "%")), vjust = -0.5, size = 3) +
       labs(x = NULL, y = "% Variance", title = "Scree Plot") + theme_publication(10)
+    embed_key("pca_scree", p)
   })
+  register_legend_key("pca_scree", pca_scree_obj, "pca", inline = TRUE)
   output$pca_scree <- renderPlot({ pca_scree_obj() })
   output$dl_pca_scree <- downloadHandler(
     filename = function() paste0("pca_scree.", fmt_ext(input$pca_format)),
@@ -6850,14 +6916,16 @@ server <- function(input, output, session) {
     scores <- as.data.frame(res$pca$x[, 1:2]); scores$Condition <- res$df$Condition; scores$Time_min <- res$df$Time_min
     cen <- scores %>% group_by(Condition, Time_min) %>% summarise(PC1 = mean(PC1), PC2 = mean(PC2), .groups = "drop") %>% arrange(Condition, Time_min)
     vpct <- round(res$var_explained[2, 1:2] * 100, 1); cols <- cond_colors()
-    ggplot(cen, aes(x = PC1, y = PC2, color = Condition)) +
+    p <- ggplot(cen, aes(x = PC1, y = PC2, color = Condition)) +
       geom_path(aes(group = Condition), linewidth = 1.2, arrow = arrow(length = unit(0.25, "cm"), type = "closed")) +
       geom_point(size = 4) + geom_text(aes(label = fmt_time(Time_min)), vjust = -1, size = 3.5) +
       scale_color_manual(values = cols) +
       labs(x = paste0("PC1 (", vpct[1], "%)"), y = paste0("PC2 (", vpct[2], "%)"),
            title = "Morphological Trajectory", subtitle = "Centroids connected over time") +
       get_theme(input, "pca")
+    embed_key("pca_traj", p)
   })
+  register_legend_key("pca_traj", pca_traj_obj, "pca", inline = TRUE)
 
   output$pca_trajectory <- renderPlot({
     if (isTRUE(input$pca_show_trajectories)) pca_traj_obj()
@@ -6865,37 +6933,35 @@ server <- function(input, output, session) {
   })
 
   # --- PCA Loadings Bar Plot ---
-  pca_loadings_bar_obj <- reactive({
+  # The two loading panels share one mapping (bar colour = sign of the loading),
+  # so the legend key is cut from the first panel. The panels hide their legend
+  # by default; the embed switch shows it inside the first panel.
+  pca_loading_panels <- reactive({
     req(pca_result()); res <- pca_result(); req(res$ok)
     rot <- as.data.frame(res$pca$rotation[, 1:min(2, ncol(res$pca$rotation))])
     rot$Feature <- rownames(rot)
     vpct <- round(res$var_explained[2, 1:min(2, ncol(res$var_explained))] * 100, 1)
-    # PC1 loadings
-    rot1 <- rot[order(abs(rot$PC1), decreasing = TRUE), ]
-    rot1$Feature <- factor(rot1$Feature, levels = rev(rot1$Feature))
-    rot1$Direction <- ifelse(rot1$PC1 >= 0, "Positive", "Negative")
-    p1 <- ggplot(rot1, aes(x = Feature, y = PC1, fill = Direction)) +
-      geom_col(alpha = 0.85, width = 0.7) +
-      coord_flip() + geom_hline(yintercept = 0, linewidth = 0.3) +
-      scale_fill_manual(values = c("Positive" = "#3498DB", "Negative" = "#E74C3C")) +
-      labs(x = NULL, y = paste0("Loading on PC1 (", vpct[1], "%)"),
-           title = "Feature Contributions to PC1",
-           subtitle = "Which morphological features drive the main axis of variation") +
-      get_theme(input, "pca") + theme(legend.position = "none")
-    if (ncol(rot) >= 3) {
-      rot2 <- rot[order(abs(rot$PC2), decreasing = TRUE), ]
-      rot2$Feature <- factor(rot2$Feature, levels = rev(rot2$Feature))
-      rot2$Direction <- ifelse(rot2$PC2 >= 0, "Positive", "Negative")
-      p2 <- ggplot(rot2, aes(x = Feature, y = PC2, fill = Direction)) +
+    panel <- function(pc, i, subtitle = NULL) {
+      d <- rot[order(abs(rot[[pc]]), decreasing = TRUE), ]
+      d$Feature <- factor(d$Feature, levels = rev(d$Feature))
+      d$Direction <- factor(ifelse(d[[pc]] >= 0, "Positive", "Negative"), levels = c("Positive", "Negative"))
+      ggplot(d, aes(x = Feature, y = .data[[pc]], fill = Direction)) +
         geom_col(alpha = 0.85, width = 0.7) +
         coord_flip() + geom_hline(yintercept = 0, linewidth = 0.3) +
-        scale_fill_manual(values = c("Positive" = "#3498DB", "Negative" = "#E74C3C")) +
-        labs(x = NULL, y = paste0("Loading on PC2 (", vpct[2], "%)"),
-             title = "Feature Contributions to PC2") +
-        get_theme(input, "pca") + theme(legend.position = "none")
-      if (has_patchwork) p1 / p2 else p1
-    } else p1
+        scale_fill_manual(values = c("Positive" = "#3498DB", "Negative" = "#E74C3C"), drop = FALSE) +
+        labs(x = NULL, y = paste0("Loading on ", pc, " (", vpct[i], "%)"),
+             title = paste0("Feature Contributions to ", pc), subtitle = subtitle, fill = "Loading sign") +
+        get_theme(input, "pca")
+    }
+    list(p1 = panel("PC1", 1, "Which morphological features drive the main axis of variation"),
+         p2 = if (ncol(rot) >= 3) panel("PC2", 2) else NULL)
   })
+  pca_loadings_bar_obj <- reactive({
+    pp <- pca_loading_panels(); hide <- theme(legend.position = "none")
+    p1 <- if (isTRUE(input$pca_loadings_legend_embed)) legend_key_plot(pp$p1, inside = TRUE) else pp$p1 + hide
+    if (!is.null(pp$p2) && has_patchwork) p1 / (pp$p2 + hide) else p1
+  })
+  register_legend_key("pca_loadings", function() pca_loading_panels()$p1, "pca", inline = TRUE)
   output$pca_loadings_bar <- renderPlot({ pca_loadings_bar_obj() })
   output$dl_pca_loadings <- downloadHandler(
     filename = function() paste0("pca_loadings.", fmt_ext(input$pca_format)),
@@ -6950,7 +7016,9 @@ server <- function(input, output, session) {
                    "Var(PC2)", "Mean Dist.", "Centroid PC1", "Centroid PC2"))
   })
 
-  pca_diversity_plot_obj <- reactive({
+  # Both diversity panels colour Condition the same way, so they share one key:
+  # collected at the right by default, or inside the first panel when embedded.
+  pca_diversity_panels <- reactive({
     req(pca_diversity_data()); dd <- pca_diversity_data(); cols <- cond_colors()
     dd$Time_fac <- factor(fmt_time(dd$Time_min),
                           levels = fmt_time(sort(unique(dd$Time_min))))
@@ -6968,8 +7036,16 @@ server <- function(input, output, session) {
            title = "Morphological Heterogeneity",
            subtitle = "Higher = more phenotypic spread from group center") +
       get_theme(input, "pca")
-    if (has_patchwork) p1 + p2 else p1
+    list(p1 = p1, p2 = p2)
   })
+  pca_diversity_plot_obj <- reactive({
+    pp <- pca_diversity_panels()
+    if (isTRUE(input$pca_diversity_legend_embed)) {
+      p1 <- legend_key_plot(pp$p1, inside = TRUE); p2 <- pp$p2 + theme(legend.position = "none")
+      if (has_patchwork) p1 + p2 else p1
+    } else if (has_patchwork) pp$p1 + pp$p2 + patchwork::plot_layout(guides = "collect") else pp$p1
+  })
+  register_legend_key("pca_diversity", function() pca_diversity_panels()$p1, "pca", inline = TRUE)
   output$pca_diversity_plot <- renderPlot({ pca_diversity_plot_obj() })
   output$dl_pca_diversity <- downloadHandler(
     filename = function() paste0("pca_diversity.", fmt_ext(input$pca_format)),
@@ -7000,15 +7076,21 @@ server <- function(input, output, session) {
     showNotification(paste(k, "phenotypes identified."), type = "message")
   })
 
+  # Phenotype clusters use the colourblind-safe default palette, the same in the
+  # composition figure and the morphospace-by-phenotype figure.
+  phenotype_colors <- function(k) setNames(default_cond_colors(k), paste0("P", seq_len(k)))
   clust_k_plot_obj <- reactive({
-    req(cluster_result()); cr <- cluster_result(); req(cr$k_info)
+    req(cluster_result()); cr <- cluster_result()
+    validate(need(!is.null(cr$k_info), "k was set manually, so no silhouette search was run."))
     ki <- cr$k_info; pdf <- data.frame(k = ki$k_range, Sil = ki$sil)
     pdf <- pdf[!is.na(pdf$Sil), ]
-    ggplot(pdf, aes(x = k, y = Sil)) + geom_line(linewidth = 1, color = "#3498DB") + geom_point(size = 3, color = "#3498DB") +
+    p <- ggplot(pdf, aes(x = k, y = Sil)) + geom_line(linewidth = 1, color = "#3498DB") + geom_point(size = 3, color = "#3498DB") +
       geom_vline(xintercept = cr$k, linetype = "dashed", color = "#D94A4A") +
       annotate("text", x = cr$k + 0.3, y = max(pdf$Sil, na.rm = TRUE), label = paste("k =", cr$k), color = "#D94A4A") +
       scale_x_continuous(breaks = ki$k_range) + labs(x = "k", y = "Silhouette", title = "Optimal k") + theme_publication(10)
+    embed_key("clust_k", p)
   })
+  register_legend_key("clust_k", clust_k_plot_obj, "clust", inline = TRUE)
   output$clust_k_plot <- renderPlot({ clust_k_plot_obj() })
   output$dl_clust_k <- downloadHandler(
     filename = function() paste0("cluster_optimal_k.", fmt_ext(input$clust_format)),
@@ -7017,9 +7099,12 @@ server <- function(input, output, session) {
   clust_pca_plot_obj <- reactive({
     req(cluster_result()); cr <- cluster_result()
     vpct <- round(cr$var_explained[2, 1:2] * 100, 1)
-    ggplot(cr$df, aes(x = PC1, y = PC2, color = Phenotype)) + geom_point(alpha = 0.3, size = 1) +
+    p <- ggplot(cr$df, aes(x = PC1, y = PC2, color = Phenotype)) + geom_point(alpha = 0.3, size = 1) +
+      scale_color_manual(values = phenotype_colors(cr$k)) +
       labs(x = paste0("PC1 (", vpct[1], "%)"), y = paste0("PC2 (", vpct[2], "%)"), title = "By Phenotype") + theme_publication(10)
+    embed_key("clust_pca", p)
   })
+  register_legend_key("clust_pca", clust_pca_plot_obj, "clust", inline = TRUE)
   output$clust_pca_plot <- renderPlot({ clust_pca_plot_obj() })
   output$dl_clust_pca <- downloadHandler(
     filename = function() paste0("cluster_pca.", fmt_ext(input$clust_format)),
@@ -7031,6 +7116,7 @@ server <- function(input, output, session) {
       group_by(Condition, Time_min) %>% mutate(pct = n / sum(n) * 100) %>% ungroup()
     comp$Time_fac <- factor(fmt_time(comp$Time_min), levels = fmt_time(sort(unique(comp$Time_min))))
     p <- ggplot(comp, aes(x = Time_fac, y = pct, fill = Phenotype)) + geom_col(position = "stack", width = 0.7) +
+      scale_fill_manual(values = phenotype_colors(cr$k)) +
       facet_wrap(~ Condition) + labs(x = "Time", y = "% Cells", title = "Phenotype Composition Over Time") +
       get_theme(input, "clust") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
     apply_custom_labs(p, input, "clust")
@@ -7153,11 +7239,14 @@ server <- function(input, output, session) {
       mutate(Effect = recode(Effect, Condition_partial_eta2 = "Condition",
                              Time_partial_eta2 = "Time", Interaction_partial_eta2 = "Interaction"))
     imp$Effect <- factor(imp$Effect, levels = c("Condition", "Time", "Interaction"))
-    ggplot(imp, aes(x = reorder(Feature, eta2), y = eta2, fill = Effect)) +
+    p <- ggplot(imp, aes(x = reorder(Feature, eta2), y = eta2, fill = Effect)) +
       geom_col(position = "dodge", alpha = 0.85) + coord_flip() +
+      scale_fill_manual(values = c(Condition = "#0072B2", Time = "#E69F00", Interaction = "#009E73")) +
       labs(x = NULL, y = "Partial Eta-Squared", title = "Feature Importance",
            subtitle = "small=0.01, medium=0.06, large=0.14") + theme_publication(10)
+    embed_key("mf_importance", p)
   })
+  register_legend_key("mf_importance", mf_importance_obj, "mf", inline = TRUE)
   output$mf_importance <- renderPlot({ mf_importance_obj() })
   output$dl_mf_importance <- downloadHandler(
     filename = function() paste0("feature_importance.", fmt_ext(input$mf_format)),
@@ -7231,14 +7320,16 @@ server <- function(input, output, session) {
       p <- p + geom_text(aes(label = round(value, 2)),
         size = base_sz / 4, color = "black")
     }
-    p + labs(title = "Raw Values Heatmap",
+    p <- p + labs(title = "Raw Values Heatmap",
              subtitle = paste0("Feature × (Condition × Time) — ", stat_fn,
                if (isTRUE(input$mf_raw_zscore)) " (z-scored)" else ""),
              x = NULL, y = NULL) +
       theme_publication(base_sz, show_grid = FALSE) +
       theme(axis.text.x = element_text(angle = 45, hjust = 1, size = rel(0.8)),
             panel.border = element_blank())
+    embed_key("mf_raw", p)
   })
+  register_legend_key("mf_raw", mf_raw_heatmap_obj, "mf", inline = TRUE)
 
   output$mf_raw_heatmap <- renderPlot({ mf_raw_heatmap_obj() })
   output$dl_mf_raw_heatmap <- downloadHandler(
@@ -7272,9 +7363,11 @@ server <- function(input, output, session) {
     show_grd <- isTRUE(input$mf_radar_grid)
     alpha_f  <- input$mf_radar_alpha %||% 0.25
     p <- plot_radar(radar_data, cols, base_sz, show_pts, show_grd, alpha_f)
-    p + labs(title = "Spider / Radar Plot",
+    p <- p + labs(title = "Spider / Radar Plot",
              subtitle = paste0("Features scaled [0-1], ", stat_fn, " — ", time_lbl))
+    embed_key("mf_radar", p)
   })
+  register_legend_key("mf_radar", mf_radar_obj, "mf", inline = TRUE)
 
   output$mf_radar_plot <- renderPlot({ mf_radar_obj() })
   output$dl_mf_radar <- downloadHandler(
